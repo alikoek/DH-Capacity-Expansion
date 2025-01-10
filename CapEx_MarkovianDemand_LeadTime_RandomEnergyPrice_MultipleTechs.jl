@@ -177,7 +177,15 @@ model = SDDP.MarkovianPolicyGraph(
             sum(c_operational_cost[tech] * u_production_tech[tech, hour] for tech in technologies, hour in 1:c_hours) +
             sum(u_unmet[hour] * c_penalty for hour in 1:c_hours)
             )
-
+        
+        SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
+            # We treat (c_operational_cost[tech] + ω) as the total variable cost
+            @stageobjective(sp,
+                sum( (c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
+                    for tech in technologies, hour in 1:c_hours ) +
+                sum(u_unmet[hour] * c_penalty for hour in 1:c_hours)
+            )
+        end
         # Stage objective (operational costs)
         #SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
         #    @stageobjective(sp,
