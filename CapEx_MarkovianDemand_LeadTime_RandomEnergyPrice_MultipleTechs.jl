@@ -207,7 +207,6 @@ println("Optimal Cost: ", SDDP.calculate_bound(model))
 simulations = SDDP.simulate(model, 100, [:x_capacity_tech, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
-
 for t in 1:(T*2)
     sp = simulations[1][t]
     if t % 2 == 1  # Investment stages (odd stages)
@@ -260,28 +259,6 @@ for tech in technologies
 end
 
 SDDP.plot(plt, "spaghetti_plot.html")
-
-
-plt = SDDP.SpaghettiPlot(simulations)
-
-SDDP.add_spaghetti(plt; title="Capacity_out") do data
-    return data[:x_capacity].out
-end
-
-SDDP.add_spaghetti(plt; title="Capacity_in") do data
-    return data[:x_capacity].in
-end
-
-SDDP.add_spaghetti(plt; title="Expansion") do data
-    return data[:u_expansion]
-end
-
-SDDP.add_spaghetti(plt; title="Dispatch") do data
-    return sum(data[:u_production])
-end
-
-SDDP.plot(plt, "spaghetti_plot.html")
-
 
 last_dispatch = [sum(value(simulations[i][6][:u_production][hour]) for hour in 1:c_hours) for i in 1:100]
 # get the unique values of the last dispatch
