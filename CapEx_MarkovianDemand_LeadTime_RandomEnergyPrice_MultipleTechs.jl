@@ -245,6 +245,18 @@ for tech in technologies
     SDDP.add_spaghetti(plt; title="Production_$tech") do data
         return sum(data[:u_production_tech][tech, :])
     end
+
+    SDDP.add_spaghetti(plt; title="Annual Demand_in") do data
+        return data[:x_annual_demand].in
+    end
+
+    SDDP.add_spaghetti(plt; title="Annual Demand_out") do data
+        return data[:x_annual_demand].out
+    end
+
+    SDDP.add_spaghetti(plt; title="Unmet Demand") do data
+        return sum(data[:u_unmet])
+    end
 end
 
 SDDP.plot(plt, "spaghetti_plot.html")
