@@ -1,7 +1,7 @@
 using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames
 
 # Problem Data
-T = 3  # Total number of years
+T = 3  # Total number of years --> 2025, 2030, 2035
 c_hours = 8760
 
 # read excel file for load profile
@@ -173,27 +173,14 @@ model = SDDP.MarkovianPolicyGraph(
         @constraint(sp, [tech in technologies], pipeline_tech[tech].out == 0)
 
         # Stage objective (operational costs)
-        @stageobjective(sp,
-            sum(c_operational_cost[tech] * u_production_tech[tech, hour] for tech in technologies, hour in 1:c_hours) +
-            sum(u_unmet[hour] * c_penalty for hour in 1:c_hours)
-            )
-        
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
             # We treat (c_operational_cost[tech] + ω) as the total variable cost
             @stageobjective(sp,
-                sum( (c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
+                sum((c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
                     for tech in technologies, hour in 1:c_hours ) +
                 sum(u_unmet[hour] * c_penalty for hour in 1:c_hours)
             )
         end
-        # Stage objective (operational costs)
-        #SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
-        #    @stageobjective(sp,
-        #        sum(c_operational_cost * u_production[hour] for hour in 1:c_hours) +
-        #        sum(u_unmet[hour] * c_penalty for hour in 1:c_hours) +
-        #        sum(ω * u_production[hour] for hour in 1:c_hours)
-        #    )
-        #end
     end
 end
 
