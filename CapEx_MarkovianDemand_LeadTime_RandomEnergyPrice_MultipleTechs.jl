@@ -1,12 +1,16 @@
 using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames
 
+##############################################################################
+# Basic Setup
+##############################################################################
+
 # Problem Data
 T = 3  # Total number of years --> 2025, 2030, 2035
 c_hours = 8760
 
 # read excel file for load profile
 filename = joinpath(@__DIR__, "LoadProfile.csv")
-load_profile = CSV.read(filename, DataFrames.DataFrame, delim=";", decimal = ',')
+load_profile = CSV.read(filename, DataFrames.DataFrame, delim=";", decimal=',')
 load_profile = collect(load_profile[:, "load"])
 load_profile_normalized = load_profile ./ sum(load_profile)
 
@@ -21,6 +25,14 @@ maximum(load)
 # Technological parameters
 # Technology Names
 technologies = [:CHP, :Boiler, :HeatPump]
+
+# Lifetime in "years" (or pairs of stages)
+# e.g., lifetime[:CHP] = 2 means "2 years" of operational usage
+lifetime = Dict(
+    :CHP => 2,
+    :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
+    :HeatPump => 1,   # only 1-year lifetime => retires quickly
+)
 
 # Operational Costs (€/MWh)
 c_operational_cost = Dict(
@@ -67,23 +79,31 @@ c_efficiency = Dict(
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
 
+##############################################################################
+# MarkovianPolicyGraph: Demand transitions + Root distribution
+##############################################################################
+
 # Create a 3x3 identity matrix
 I = Diagonal(ones(3))
 
 # Transition Matrices (explicitly converted to Matrix{Float64})
 transition_matrices = Array{Float64,2}[
     [1.0]',  # Initial state: deterministic (start in the single initial state)
-    [1.0]', 
+    [1.0]',
     [0.3 0.5 0.2],  # Transition probabilities between the 3 demand states
     I,  # put here an identity matrix
     [0.3 0.5 0.2
-    0.3 0.5 0.2
-    0.3 0.5 0.2],  
+        0.3 0.5 0.2
+        0.3 0.5 0.2],
     I,
 ]
 
 # the code below prints the markovian graph
 SDDP.MarkovianGraph(transition_matrices)
+
+##############################################################################
+# Stagewise-Independent Energy Price
+##############################################################################
 
 # Log Normal distribution for the energy price
 mean_price = 37.0  # Average energy price in currency units per unit of energy
@@ -97,6 +117,23 @@ price_values = quantile.(price_distribution, price_quantiles)
 price_probabilities = pdf(price_distribution, price_values)
 price_probabilities_normalized = price_probabilities / sum(price_probabilities)
 
+##############################################################################
+# Function to check if capacity built at investment stage s_invest 
+# is still alive at current stage s_current.
+##############################################################################
+function is_alive(s_invest::Int, s_current::Int, tech::Symbol)
+    # The "year" index for s_invest is ceil(s_invest/2).
+    # The "year" index for s_current is  ceil(s_current/2).
+    year_invest = ceil(s_invest / 2)
+    year_current = ceil(s_current / 2)
+    # If lifetime[tech] = L, that means capacity is alive for L "years" 
+    # after it's built (including the year it's built).
+    return (year_current - year_invest) < lifetime[tech]
+end
+
+##############################################################################
+# Create SDDP model
+##############################################################################
 # Create the Markovian policy graph
 model = SDDP.MarkovianPolicyGraph(
     transition_matrices=transition_matrices,
@@ -109,15 +146,6 @@ model = SDDP.MarkovianPolicyGraph(
 
     # Variables
     @variables(sp, begin
-        # Capacity State Variables for each technology
-        0 <= x_capacity_tech[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
-        # Investment pipeline.
-        #   pipeline.out are the investments made in the current stage
-        #   pipeline.in are the investments that becomes available at this stage
-        #     and can be added to the capacity.
-        #   Investments move up one slot in the pipeline each stage.
-        # Pipeline State Variables for each technology
-        0 <= pipeline_tech[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
         # Investment Decision Variables for each technology
         0 <= u_expansion_tech[tech in technologies] <= c_max_additional_capacity[tech]
         # Production Variables for each technology
@@ -126,23 +154,75 @@ model = SDDP.MarkovianPolicyGraph(
         0 <= x_annual_demand, SDDP.State, (initial_value = base_annual_demand)
         # Unmet demand per hour
         u_unmet[1:c_hours] >= 0
+
+        # Define a dictionary of states that track expansions built at each 
+        # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
+        0 <= cap_invest_s1[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
+        0 <= cap_invest_s3[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
+        0 <= cap_invest_s5[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
     end)
 
     ################### Investment stage (odd-numbered stages) ###################
     if t % 2 == 1
-        # Update capacity without adding pipeline contributions
-        @constraint(sp, [tech in technologies], x_capacity_tech[tech].out == x_capacity_tech[tech].in)
         # Maintain annual demand state
         @constraint(sp, x_annual_demand.out == x_annual_demand.in)
-        # Add the expansion decision to the pipeline for each technology
-        @constraint(sp, [tech in technologies], pipeline_tech[tech].out == u_expansion_tech[tech])
-        # Stage objective: expansion cost
-        @stageobjective(sp, 
-        sum(c_investment_cost[tech] * u_expansion_tech[tech] for tech in technologies) +
-        sum(c_fixed_cost[tech] * x_capacity_tech[tech].out for tech in technologies)
-        )
+        # Decide expansions in this stage => add to the relevant "cap_invest_sX"
+        if t == 1
+            @constraint(sp, [tech in technologies],
+                cap_invest_s1[tech].out == cap_invest_s1[tech].in + u_expansion_tech[tech]
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s3[tech].out == cap_invest_s3[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s5[tech].out == cap_invest_s5[tech].in
+            )
+        elseif t == 3
+            @constraint(sp, [tech in technologies],
+                cap_invest_s1[tech].out == cap_invest_s1[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s3[tech].out == cap_invest_s3[tech].in + u_expansion_tech[tech]
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s5[tech].out == cap_invest_s5[tech].in
+            )
+        elseif t == 5
+            @constraint(sp, [tech in technologies],
+                cap_invest_s1[tech].out == cap_invest_s1[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s3[tech].out == cap_invest_s3[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s5[tech].out == cap_invest_s5[tech].in + u_expansion_tech[tech]
+            )
+        end
 
-    ################### Operational stage (even-numbered stages) ###################
+        # Stage objective: expansion cost + fixed O&M costs
+        # Expansion cost
+        expr_invest_cost = sum(
+            c_investment_cost[tech] * u_expansion_tech[tech]
+            for tech in technologies
+        )
+        # Fixed O&M costs for the capacities that are still alive
+        expr_opex_fix = 0.0
+        for tech in technologies
+            # sum capacity from stages 1,3,5 that is alive
+            # in the "year" = ceil(t/2).
+            if is_alive(1, t, tech)
+                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s1[tech].in
+            end
+            if is_alive(3, t, tech)
+                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s3[tech].in
+            end
+            if is_alive(5, t, tech)
+                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s5[tech].in
+            end
+        end
+        @stageobjective(sp, expr_invest_cost + expr_opex_fix)
+
+        ################### Operational stage (even-numbered stages) ###################
     else
         # ensure that annual demand is not changed in the first year
         if t == 2
@@ -155,31 +235,60 @@ model = SDDP.MarkovianPolicyGraph(
         # Apply constraints for production and unmet demand based on the stochastic annual demand
         for hour in 1:c_hours
             actual_demand = d_annual * load_profile_normalized[hour]
-        
+
             # Total production from all technologies plus unmet demand meets the actual demand
             @constraint(sp, sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] == actual_demand)
-        
-            # Capacity constraints for each technology
-            @constraint(sp, [tech in technologies], u_production_tech[tech, hour] <= x_capacity_tech[tech].in)
+
+            ### Capacity constraints for each technology ###
+            # Identify total capacity available
+            # = sum of expansions built in each prior investment stage that is still alive
+            # For each technology, 
+            #   u_production_tech[tech,hour] <= (sum of alive expansions)
+            for tech in technologies
+                # sum expansions from s=1,3,5 that are alive
+                local capacity_alive = 0.0
+                if is_alive(1, t, tech)
+                    capacity_alive += cap_invest_s1[tech].in
+                end
+                if is_alive(3, t, tech)
+                    capacity_alive += cap_invest_s3[tech].in
+                end
+                if is_alive(5, t, tech)
+                    capacity_alive += cap_invest_s5[tech].in
+                end
+
+                @constraint(sp,
+                    u_production_tech[tech, hour] <= capacity_alive
+                )
+            end
         end
 
+        # State updates for investment states: no new expansions at operation stages
         # Update capacity with the investments in the pipeline  for each technology
-        @constraint(sp, [tech in technologies], x_capacity_tech[tech].out == x_capacity_tech[tech].in + pipeline_tech[tech].in) 
+        @constraint(sp, [tech in technologies],
+            cap_invest_s1[tech].out == cap_invest_s1[tech].in
+        )
+        @constraint(sp, [tech in technologies],
+            cap_invest_s3[tech].out == cap_invest_s3[tech].in
+        )
+        @constraint(sp, [tech in technologies],
+            cap_invest_s5[tech].out == cap_invest_s5[tech].in
+        )
 
         # Update annual demand state
         @constraint(sp, x_annual_demand.out == d_annual)
 
-        # Reset the pipeline for each technology
-        @constraint(sp, [tech in technologies], pipeline_tech[tech].out == 0)
-
-        # Stage objective (operational costs)
+        ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
             # We treat (c_operational_cost[tech] + ω) as the total variable cost
-            @stageobjective(sp,
-                sum((c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
-                    for tech in technologies, hour in 1:c_hours ) +
-                sum(u_unmet[hour] * c_penalty for hour in 1:c_hours)
+            expr_opex_var = sum(
+                (c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
+                for tech in technologies, hour in 1:c_hours
             )
+            # cost of unmet demand
+            expr_unmet = sum(u_unmet[hour] for hour in 1:c_hours) * c_penalty
+            
+            @stageobjective(sp, expr_opex_var + expr_unmet)
         end
     end
 end
@@ -191,7 +300,7 @@ SDDP.train(model; iteration_limit=50)
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 100, [:x_capacity_tech, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 2, [:cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
@@ -200,14 +309,19 @@ for t in 1:(T*2)
         println("Year $(div(t + 1, 2)) - Investment Stage")
         for tech in technologies
             println("  Technology: $tech")
-            println("    Capacity_in = ", value(sp[:x_capacity_tech][tech].in))
             println("    Expansion = ", value(sp[:u_expansion_tech][tech]))
-            println("    Capacity_out = ", value(sp[:x_capacity_tech][tech].out))
+            println("    Capacity_s1_in = ", value(sp[:cap_invest_s1][tech].in))
+            println("    Capacity_s1_out = ", value(sp[:cap_invest_s1][tech].out))
+            println("    Capacity_s3_in = ", value(sp[:cap_invest_s3][tech].in))
+            println("    Capacity_s3_out = ", value(sp[:cap_invest_s3][tech].out))
+            println("    Capacity_s5_in = ", value(sp[:cap_invest_s5][tech].in))
+            println("    Capacity_s5_out = ", value(sp[:cap_invest_s5][tech].out))
         end
     else  # Operational stages
         println("Year $(div(t, 2)) - Operational Stage")
         println("   Demand_in = ", value(sp[:x_annual_demand].in))
         println("   Demand_out = ", value(sp[:x_annual_demand].out))
+        println("  Total Production = ", total_production)
         total_production = sum(sum(value(sp[:u_production_tech][tech, hour]) for hour in 1:c_hours) for tech in technologies)
         total_unmet = sum(value(sp[:u_unmet][hour]) for hour in 1:c_hours)
         println("  Total Production = ", total_production)
