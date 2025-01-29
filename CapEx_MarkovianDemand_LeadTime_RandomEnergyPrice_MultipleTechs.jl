@@ -1,4 +1,4 @@
-using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames
+using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statistics
 
 ##############################################################################
 # Basic Setup
@@ -7,20 +7,6 @@ using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames
 # Problem Data
 T = 3  # Total number of years --> 2025, 2030, 2035
 c_hours = 8760
-
-# read excel file for load profile
-filename = joinpath(@__DIR__, "LoadProfile.csv")
-load_profile = CSV.read(filename, DataFrames.DataFrame, delim=";", decimal=',')
-load_profile = collect(load_profile[:, "load"])
-load_profile_normalized = load_profile ./ sum(load_profile)
-
-# Base annual demand
-base_annual_demand = 100000.0
-# Penalty cost for unmet demand (€/MWh)
-c_penalty = 1000.0
-
-load = load_profile_normalized * base_annual_demand
-maximum(load)
 
 # Technological parameters
 # Technology Names
@@ -75,6 +61,47 @@ c_efficiency = Dict(
     :Boiler => 0.85,
     :HeatPump => 3.0  # Coefficient of Performance (COP)
 )
+
+##############################################################################
+# Typical hours
+##############################################################################
+# read excel file for load profile
+filename = joinpath(@__DIR__, "LoadProfile.csv")
+load_profile = CSV.read(filename, DataFrames.DataFrame, delim=";", decimal=',')
+load_profile = collect(load_profile[:, "load"])
+load_profile_normalized = load_profile ./ sum(load_profile)
+
+profile = load_profile_normalized
+n_typical_hours = 1000
+quants = quantile(profile, LinRange(0, 1, n_typical_hours))
+diff = (reshape(profile, (size(load_profile)..., 1)) .- quants') .^ 2
+mindist = argmin(diff, dims=2)
+second_component = getindex.(mindist, 2)
+
+typical_hours = []
+for (index, quant) in enumerate(quants)
+    typical_hour = Dict(
+        :value => quant,
+        :qty => count(x -> x == index, second_component)
+    )
+
+    push!(typical_hours, typical_hour)
+end
+print(typical_hours)
+
+plot(load_profile_normalized, label="Original", title="Approximation versus Original")
+plot!(quants[second_component[:]], label="approximation")
+
+plot(sort(load_profile_normalized), label="Original", title="Approximation versus Original - Sorted")
+plot!(sort(quants[second_component[:]]), label="approximation")
+
+# Base annual demand
+base_annual_demand = 100000.0
+# Penalty cost for unmet demand (€/MWh)
+c_penalty = 1000.0
+
+load = load_profile_normalized * base_annual_demand
+maximum(load)
 
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
@@ -149,11 +176,11 @@ model = SDDP.MarkovianPolicyGraph(
         # Investment Decision Variables for each technology
         0 <= u_expansion_tech[tech in technologies] <= c_max_additional_capacity[tech]
         # Production Variables for each technology
-        u_production_tech[tech in technologies, 1:c_hours] >= 0
+        u_production_tech[tech in technologies, 1:n_typical_hours] >= 0
         # Demand state
         0 <= x_annual_demand, SDDP.State, (initial_value = base_annual_demand)
         # Unmet demand per hour
-        u_unmet[1:c_hours] >= 0
+        u_unmet[1:n_typical_hours] >= 0
 
         # Define a dictionary of states that track expansions built at each 
         # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
@@ -233,8 +260,8 @@ model = SDDP.MarkovianPolicyGraph(
         end
 
         # Apply constraints for production and unmet demand based on the stochastic annual demand
-        for hour in 1:c_hours
-            actual_demand = d_annual * load_profile_normalized[hour]
+        for hour in 1:n_typical_hours
+            actual_demand = d_annual * typical_hours[hour][:value]
 
             # Total production from all technologies plus unmet demand meets the actual demand
             @constraint(sp, sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] == actual_demand)
@@ -281,20 +308,19 @@ model = SDDP.MarkovianPolicyGraph(
         ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
             # We treat (c_operational_cost[tech] + ω) as the total variable cost
-            expr_opex_var = sum(
-                (c_operational_cost[tech] + ω) * u_production_tech[tech, hour]
-                for tech in technologies, hour in 1:c_hours
-            )
-            # cost of unmet demand
-            expr_unmet = sum(u_unmet[hour] for hour in 1:c_hours) * c_penalty
-            
-            @stageobjective(sp, expr_opex_var + expr_unmet)
+            @stageobjective(sp,
+                sum(
+                    (sum(
+                        (c_operational_cost[tech] + ω) * u_production_tech[tech, hour] for tech in technologies
+                    ) +
+                     u_unmet[hour] * c_penalty
+                    ) * typical_hours[hour][:qty] for hour in 1:n_typical_hours))
         end
     end
 end
 
 # Train the model
-SDDP.train(model; iteration_limit=50)
+SDDP.train(model; iteration_limit=100)
 
 # Retrieve results
 println("Optimal Cost: ", SDDP.calculate_bound(model))
