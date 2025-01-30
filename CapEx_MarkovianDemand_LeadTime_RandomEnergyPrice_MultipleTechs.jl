@@ -14,7 +14,7 @@ technologies = [:CHP, :Boiler, :HeatPump]
 
 # Lifetime in "years" (or pairs of stages)
 # e.g., lifetime[:CHP] = 2 means "2 years" of operational usage
-lifetime = Dict(
+c_lifetime = Dict(
     :CHP => 2,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
     :HeatPump => 1,   # only 1-year lifetime => retires quickly
@@ -87,7 +87,7 @@ for (index, quant) in enumerate(quants)
 
     push!(typical_hours, typical_hour)
 end
-print(typical_hours)
+# print(typical_hours)
 
 plot(load_profile_normalized, label="Original", title="Approximation versus Original")
 plot!(quants[second_component[:]], label="approximation")
@@ -154,8 +154,8 @@ function is_alive(s_invest::Int, s_current::Int, tech::Symbol)
     year_invest = ceil(s_invest / 2)
     year_current = ceil(s_current / 2)
     # If lifetime[tech] = L, that means capacity is alive for L "years" 
-    # after it's built (including the year it's built).
-    return (year_current - year_invest) < lifetime[tech]
+    # after it's built (starting from the year built + 1 --> ensures lead time of 1 model year (5 year representation)).
+    return (1 <= (year_current - year_invest)) && ((year_current - year_invest) <= c_lifetime[tech])
 end
 
 ##############################################################################
@@ -184,10 +184,18 @@ model = SDDP.MarkovianPolicyGraph(
 
         # Define a dictionary of states that track expansions built at each 
         # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
+        # cap_invest_s0 represents the initial capacities
+        0 <= cap_invest_s0[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
+        # 0 <= x_capacity_tech[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
         0 <= cap_invest_s1[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
         0 <= cap_invest_s3[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
         0 <= cap_invest_s5[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
     end)
+
+    ### inital capacities stays the same regardless of the stage
+    @constraint(sp, [tech in technologies],
+        cap_invest_s0[tech].out == cap_invest_s0[tech].in
+    )
 
     ################### Investment stage (odd-numbered stages) ###################
     if t % 2 == 1
@@ -237,6 +245,9 @@ model = SDDP.MarkovianPolicyGraph(
         for tech in technologies
             # sum capacity from stages 1,3,5 that is alive
             # in the "year" = ceil(t/2).
+            if is_alive(0, t, tech)
+                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s0[tech].in
+            end
             if is_alive(1, t, tech)
                 expr_opex_fix += c_fixed_cost[tech] * cap_invest_s1[tech].in
             end
@@ -274,6 +285,9 @@ model = SDDP.MarkovianPolicyGraph(
             for tech in technologies
                 # sum expansions from s=1,3,5 that are alive
                 local capacity_alive = 0.0
+                if is_alive(0, t, tech)
+                    capacity_alive += cap_invest_s0[tech].in
+                end
                 if is_alive(1, t, tech)
                     capacity_alive += cap_invest_s1[tech].in
                 end
@@ -326,7 +340,7 @@ SDDP.train(model; iteration_limit=100)
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 2, [:cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 2, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
@@ -336,6 +350,8 @@ for t in 1:(T*2)
         for tech in technologies
             println("  Technology: $tech")
             println("    Expansion = ", value(sp[:u_expansion_tech][tech]))
+            println("    Capacity_s0_in = ", value(sp[:cap_invest_s0][tech].in))
+            println("    Capacity_s0_out = ", value(sp[:cap_invest_s0][tech].out))
             println("    Capacity_s1_in = ", value(sp[:cap_invest_s1][tech].in))
             println("    Capacity_s1_out = ", value(sp[:cap_invest_s1][tech].out))
             println("    Capacity_s3_in = ", value(sp[:cap_invest_s3][tech].in))
@@ -350,6 +366,9 @@ for t in 1:(T*2)
         for tech in technologies
             # sum expansions from s=1,3,5 that are alive
             local capacity_alive = 0.0
+            if is_alive(0, t, tech)
+                capacity_alive += value(sp[:cap_invest_s0][tech].in)
+            end
             if is_alive(1, t, tech)
                 capacity_alive += value(sp[:cap_invest_s1][tech].in)
             end
