@@ -347,9 +347,22 @@ for t in 1:(T*2)
         println("Year $(div(t, 2)) - Operational Stage")
         println("   Demand_in = ", value(sp[:x_annual_demand].in))
         println("   Demand_out = ", value(sp[:x_annual_demand].out))
-        println("  Total Production = ", total_production)
-        total_production = sum(sum(value(sp[:u_production_tech][tech, hour]) for hour in 1:c_hours) for tech in technologies)
-        total_unmet = sum(value(sp[:u_unmet][hour]) for hour in 1:c_hours)
+        for tech in technologies
+            # sum expansions from s=1,3,5 that are alive
+            local capacity_alive = 0.0
+            if is_alive(1, t, tech)
+                capacity_alive += value(sp[:cap_invest_s1][tech].in)
+            end
+            if is_alive(3, t, tech)
+                capacity_alive += value(sp[:cap_invest_s3][tech].in)
+            end
+            if is_alive(5, t, tech)
+                capacity_alive += value(sp[:cap_invest_s5][tech].in)
+            end
+            println("    $tech alive Capacity = ", capacity_alive)
+        end
+        total_production = sum(sum(value(sp[:u_production_tech][tech, hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours) for tech in technologies)
+        total_unmet = sum(value(sp[:u_unmet][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
         println("  Total Production = ", total_production)
         println("  Total Unmet Demand = ", total_unmet)
     end
