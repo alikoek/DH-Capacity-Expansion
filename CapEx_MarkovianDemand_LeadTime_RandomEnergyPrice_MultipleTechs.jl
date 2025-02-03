@@ -5,8 +5,8 @@ using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statis
 ##############################################################################
 
 # Problem Data
-T = 3  # Total number of years --> 2025, 2030, 2035
-c_hours = 8760
+T = 3  # Total number of model years --> 2025, 2030, 2035
+T_years = 5 # number of years represented by the mmodel years
 
 # Technological parameters
 # Technology Names
@@ -21,34 +21,45 @@ c_lifetime = Dict(
 )
 
 # Operational Costs (€/MWh)
-c_operational_cost = Dict(
+c_opex_var = Dict(
     :CHP => 30.0,
     :Boiler => 10.0,
     :HeatPump => 20.0
 )
 
-# Investment Costs (€/MW)
+# Investment Costs (€/MW_th)
 c_investment_cost = Dict(
     :CHP => 1000.0,
     :Boiler => 500.0,
     :HeatPump => 800.0
 )
 
-# Fixed O&M Costs (€/MW per year)
-c_fixed_cost = Dict(
+# Fixed O&M Costs (€/MW_th per year)
+c_opex_fixed = Dict(
     :CHP => 50.0,
     :Boiler => 30.0,
     :HeatPump => 40.0
 )
 
-# Maximum Additional Capacity (MW)
+c_energy_carrier = Dict(
+    :CHP => :nat_gas,
+    :Boiler => :nat_gas,
+    :HeatPump => :elec
+)
+
+# Energy carrier prices (€/MWh)
+c_energy_carrier_price = Dict(
+    :elec => 100
+)
+
+# Maximum Additional Capacity (MW_th)
 c_max_additional_capacity = Dict(
     :CHP => 100.0,
     :Boiler => 100.0,
     :HeatPump => 100.0
 )
 
-# Initial Capacities (MW)
+# Initial Capacities (MW_th)
 c_initial_capacity = Dict(
     :CHP => 25,
     :Boiler => 20,
@@ -62,6 +73,28 @@ c_efficiency = Dict(
     :HeatPump => 3.0  # Coefficient of Performance (COP)
 )
 
+# Emission factors (tCO2/MWh_th)
+c_emission_fac = Dict(
+    :nat_gas => 0.2,
+    :elec => 0,
+)
+
+# Carbon Price (€/t) for years
+c_carbon_price = Dict(
+    1 => 50,
+    2 => 150,
+    3 => 250
+)
+
+# Function to get discount factor for stage t.
+#   Each stage is 5 years. If t=1 => 2025, t=2 => 2030, etc.
+#   We'll treat "year index" = t (1..T). 
+discount_rate = 0.05
+function discount_factor(t::Int, T_years::Int)
+    # Each stage = 5 years
+    exponent = T_years * (ceil(t / 2) - 1)
+    return 1.0 / (1.0 + discount_rate)^exponent
+end
 ##############################################################################
 # Typical hours
 ##############################################################################
@@ -72,12 +105,13 @@ load_profile = collect(load_profile[:, "load"])
 load_profile_normalized = load_profile ./ sum(load_profile)
 
 profile = load_profile_normalized
-n_typical_hours = 1000
+n_typical_hours = 100
 quants = quantile(profile, LinRange(0, 1, n_typical_hours))
 diff = (reshape(profile, (size(load_profile)..., 1)) .- quants') .^ 2
 mindist = argmin(diff, dims=2)
 second_component = getindex.(mindist, 2)
 
+quants = round.(quants, digits=6)
 typical_hours = []
 for (index, quant) in enumerate(quants)
     typical_hour = Dict(
@@ -96,9 +130,9 @@ plot(sort(load_profile_normalized), label="Original", title="Approximation versu
 plot!(sort(quants[second_component[:]]), label="approximation")
 
 # Base annual demand
-base_annual_demand = 100000.0
+base_annual_demand = 8e6 # MWh
 # Penalty cost for unmet demand (€/MWh)
-c_penalty = 1000.0
+c_penalty = 1000
 
 load = load_profile_normalized * base_annual_demand
 maximum(load)
@@ -235,6 +269,9 @@ model = SDDP.MarkovianPolicyGraph(
         end
 
         # Stage objective: expansion cost + fixed O&M costs
+        # discount_factor
+        local df = discount_factor(t, T_years)
+
         # Expansion cost
         expr_invest_cost = sum(
             c_investment_cost[tech] * u_expansion_tech[tech]
@@ -246,19 +283,21 @@ model = SDDP.MarkovianPolicyGraph(
             # sum capacity from stages 1,3,5 that is alive
             # in the "year" = ceil(t/2).
             if is_alive(0, t, tech)
-                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s0[tech].in
+                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s0[tech].in
             end
             if is_alive(1, t, tech)
-                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s1[tech].in
+                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s1[tech].in
             end
             if is_alive(3, t, tech)
-                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s3[tech].in
+                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s3[tech].in
             end
             if is_alive(5, t, tech)
-                expr_opex_fix += c_fixed_cost[tech] * cap_invest_s5[tech].in
+                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s5[tech].in
             end
         end
-        @stageobjective(sp, expr_invest_cost + expr_opex_fix)
+        # Multiply the O&M by 5 because each stage is 5 years
+        expr_opex_fix *= T_years
+        @stageobjective(sp, df * (expr_invest_cost + expr_opex_fix))
 
         ################### Operational stage (even-numbered stages) ###################
     else
@@ -272,7 +311,7 @@ model = SDDP.MarkovianPolicyGraph(
 
         # Pre-compute the capacity alive for each technology at this stage
         # = sum of expansions built in each prior investment stage that is still alive
-        capacity_alive = Dict{Symbol, JuMP.GenericAffExpr{Float64,VariableRef}}()
+        capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
         for tech in technologies
             capacity_expr = 0.0
             if is_alive(0, t, tech)
@@ -321,14 +360,26 @@ model = SDDP.MarkovianPolicyGraph(
 
         ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
-            # We treat (c_operational_cost[tech] + ω) as the total variable cost
-            @stageobjective(sp,
-                sum(
-                    (sum(
-                        (c_operational_cost[tech] + ω) * u_production_tech[tech, hour] for tech in technologies
-                    ) +
-                     u_unmet[hour] * c_penalty
-                    ) * typical_hours[hour][:qty] for hour in 1:n_typical_hours))
+            # discount factor for this stage
+            local df = discount_factor(t, T_years)
+
+            local expr_annual_cost = sum(
+                (
+                    sum(
+                        c_opex_var[tech] * u_production_tech[tech, hour] #O&M
+                        + (
+                            (c_energy_carrier[tech] == :nat_gas ? ω : c_energy_carrier_price[c_energy_carrier[tech]])
+                            + c_carbon_price[ceil(t / 2)] * c_emission_fac[c_energy_carrier[tech]]
+                        )
+                        * (u_production_tech[tech, hour] / c_efficiency[tech]
+                        )
+                        for tech in technologies
+                    )
+                    + u_unmet[hour] * c_penalty
+                ) * typical_hours[hour][:qty]
+                for hour in 1:n_typical_hours)
+            # multiply by the 5-year block and discount factor
+            @stageobjective(sp, df * T_years * expr_annual_cost)
         end
     end
 end
@@ -340,7 +391,7 @@ SDDP.train(model; iteration_limit=100)
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 2, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 10, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
