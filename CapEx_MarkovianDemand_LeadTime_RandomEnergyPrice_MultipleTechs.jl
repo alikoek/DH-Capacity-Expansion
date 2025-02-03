@@ -100,7 +100,7 @@ end
 ##############################################################################
 # read excel file for load profile
 filename = joinpath(@__DIR__, "LoadProfile.csv")
-load_profile = CSV.read(filename, DataFrames.DataFrame, delim=";", decimal=',')
+load_profile = CSV.read(filename, DataFrames.DataFrame, delim=",", decimal='.')
 load_profile = collect(load_profile[:, "load"])
 load_profile_normalized = load_profile ./ sum(load_profile)
 
@@ -111,7 +111,6 @@ diff = (reshape(profile, (size(load_profile)..., 1)) .- quants') .^ 2
 mindist = argmin(diff, dims=2)
 second_component = getindex.(mindist, 2)
 
-quants = round.(quants, digits=6)
 typical_hours = []
 for (index, quant) in enumerate(quants)
     typical_hour = Dict(
@@ -130,12 +129,16 @@ plot(sort(load_profile_normalized), label="Original", title="Approximation versu
 plot!(sort(quants[second_component[:]]), label="approximation")
 
 # Base annual demand
-base_annual_demand = 8e6 # MWh
+base_annual_demand = 6.5e6 # MWh
+
+# Compute the absolute demand profile for the first year.
+# For each typical hour, the demand is the base annual demand scaled by the normalized value.
+c_base_demand_profile = [base_annual_demand * typical_hours[i][:value] for i in 1:n_typical_hours]
+c_base_demand_profile = round.(c_base_demand_profile)
+#sum(c_base_demand_profile[i] * typical_hours[i][:qty] for i in 1:n_typical_hours)
+
 # Penalty cost for unmet demand (€/MWh)
 c_penalty = 1000
-
-load = load_profile_normalized * base_annual_demand
-maximum(load)
 
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
@@ -211,10 +214,13 @@ model = SDDP.MarkovianPolicyGraph(
         0 <= u_expansion_tech[tech in technologies] <= c_max_additional_capacity[tech]
         # Production Variables for each technology
         u_production_tech[tech in technologies, 1:n_typical_hours] >= 0
-        # Demand state
-        0 <= x_annual_demand, SDDP.State, (initial_value = base_annual_demand)
         # Unmet demand per hour
         u_unmet[1:n_typical_hours] >= 0
+
+        # State variable: cumulative demand multiplier.
+        # It is 1.0 in the first year, so the first-year demand profile is simply c_base_demand_profile.
+        # In subsequent years, it is multiplied by the demand multiplier of the respective Markovian state.
+        0 <= x_demand_mult, SDDP.State, (initial_value = 1.0)
 
         # Define a dictionary of states that track expansions built at each 
         # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
@@ -233,8 +239,8 @@ model = SDDP.MarkovianPolicyGraph(
 
     ################### Investment stage (odd-numbered stages) ###################
     if t % 2 == 1
-        # Maintain annual demand state
-        @constraint(sp, x_annual_demand.out == x_annual_demand.in)
+        # No change in the demand multiplier in investment stages.
+        @constraint(sp, x_demand_mult.out == x_demand_mult.in)
         # Decide expansions in this stage => add to the relevant "cap_invest_sX"
         if t == 1
             @constraint(sp, [tech in technologies],
@@ -303,11 +309,19 @@ model = SDDP.MarkovianPolicyGraph(
     else
         # ensure that annual demand is not changed in the first year
         if t == 2
-            d_annual = base_annual_demand
+            new_demand_mult = 1.0
         else
             # Annual demand adjustment based on the stochastic demand state
-            d_annual = demand_multipliers[demand_state] * x_annual_demand.in
+            new_demand_mult = demand_multipliers[demand_state] * x_demand_mult.in
         end
+
+        ### Apply constraints for production and unmet demand based on the stochastic annual demand
+        # Total production from all technologies plus unmet demand meets the actual demand
+        # The actual hourly demand is computed by scaling the first year's profile
+        @constraint(sp, [hour in 1:n_typical_hours],
+            sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] ==
+            c_base_demand_profile[hour] * new_demand_mult
+        )
 
         # Pre-compute the capacity alive for each technology at this stage
         # = sum of expansions built in each prior investment stage that is still alive
@@ -329,13 +343,6 @@ model = SDDP.MarkovianPolicyGraph(
             capacity_alive[tech] = capacity_expr
         end
 
-        ### Apply constraints for production and unmet demand based on the stochastic annual demand
-        # Total production from all technologies plus unmet demand meets the actual demand
-        @constraint(sp, [hour in 1:n_typical_hours],
-            sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] ==
-            d_annual * typical_hours[hour][:value]
-        )
-
         # Capacity constraints for each technology and hour:
         # For each technology, 
         #   u_production_tech[tech,hour] <= (sum of alive expansions)
@@ -355,8 +362,8 @@ model = SDDP.MarkovianPolicyGraph(
             cap_invest_s5[tech].out == cap_invest_s5[tech].in
         )
 
-        # Update annual demand state
-        @constraint(sp, x_annual_demand.out == d_annual)
+        # Update the state variable for the cumulative demand multiplier.
+        @constraint(sp, x_demand_mult.out == new_demand_mult)
 
         ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
@@ -391,7 +398,7 @@ SDDP.train(model; iteration_limit=100)
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 10, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_annual_demand, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 10, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
@@ -412,8 +419,8 @@ for t in 1:(T*2)
         end
     else  # Operational stages
         println("Year $(div(t, 2)) - Operational Stage")
-        println("   Demand_in = ", value(sp[:x_annual_demand].in))
-        println("   Demand_out = ", value(sp[:x_annual_demand].out))
+        println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+        println("   Annual Demand = ", sum(c_base_demand_profile[i] * value(sp[:x_demand_mult].out) * typical_hours[i][:qty] for i in 1:n_typical_hours))
         for tech in technologies
             # sum expansions from s=1,3,5 that are alive
             local capacity_alive = 0.0
