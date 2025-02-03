@@ -270,39 +270,39 @@ model = SDDP.MarkovianPolicyGraph(
             d_annual = demand_multipliers[demand_state] * x_annual_demand.in
         end
 
-        # Apply constraints for production and unmet demand based on the stochastic annual demand
-        for hour in 1:n_typical_hours
-            actual_demand = d_annual * typical_hours[hour][:value]
-
-            # Total production from all technologies plus unmet demand meets the actual demand
-            @constraint(sp, sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] == actual_demand)
-
-            ### Capacity constraints for each technology ###
-            # Identify total capacity available
-            # = sum of expansions built in each prior investment stage that is still alive
-            # For each technology, 
-            #   u_production_tech[tech,hour] <= (sum of alive expansions)
-            for tech in technologies
-                # sum expansions from s=1,3,5 that are alive
-                local capacity_alive = 0.0
-                if is_alive(0, t, tech)
-                    capacity_alive += cap_invest_s0[tech].in
-                end
-                if is_alive(1, t, tech)
-                    capacity_alive += cap_invest_s1[tech].in
-                end
-                if is_alive(3, t, tech)
-                    capacity_alive += cap_invest_s3[tech].in
-                end
-                if is_alive(5, t, tech)
-                    capacity_alive += cap_invest_s5[tech].in
-                end
-
-                @constraint(sp,
-                    u_production_tech[tech, hour] <= capacity_alive
-                )
+        # Pre-compute the capacity alive for each technology at this stage
+        # = sum of expansions built in each prior investment stage that is still alive
+        capacity_alive = Dict{Symbol, JuMP.GenericAffExpr{Float64,VariableRef}}()
+        for tech in technologies
+            capacity_expr = 0.0
+            if is_alive(0, t, tech)
+                capacity_expr += cap_invest_s0[tech].in
             end
+            if is_alive(1, t, tech)
+                capacity_expr += cap_invest_s1[tech].in
+            end
+            if is_alive(3, t, tech)
+                capacity_expr += cap_invest_s3[tech].in
+            end
+            if is_alive(5, t, tech)
+                capacity_expr += cap_invest_s5[tech].in
+            end
+            capacity_alive[tech] = capacity_expr
         end
+
+        ### Apply constraints for production and unmet demand based on the stochastic annual demand
+        # Total production from all technologies plus unmet demand meets the actual demand
+        @constraint(sp, [hour in 1:n_typical_hours],
+            sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] ==
+            d_annual * typical_hours[hour][:value]
+        )
+
+        # Capacity constraints for each technology and hour:
+        # For each technology, 
+        #   u_production_tech[tech,hour] <= (sum of alive expansions)
+        @constraint(sp, [tech in technologies, hour in 1:n_typical_hours],
+            u_production_tech[tech, hour] <= capacity_alive[tech]
+        )
 
         # State updates for investment states: no new expansions at operation stages
         # Update capacity with the investments in the pipeline  for each technology
