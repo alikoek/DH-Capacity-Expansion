@@ -73,7 +73,7 @@ c_efficiency = Dict(
     :HeatPump => 3.0  # Coefficient of Performance (COP)
 )
 
-salvage_fraction = 0.75
+salvage_fraction = 1
 
 # Emission factors (tCO2/MWh_th)
 c_emission_fac = Dict(
@@ -85,7 +85,8 @@ c_emission_fac = Dict(
 c_carbon_price = Dict(
     1 => 50,
     2 => 150,
-    3 => 250
+    3 => 250,
+    4 => 350
 )
 
 # Function to get discount factor for stage t.
@@ -159,6 +160,10 @@ transition_matrices = Array{Float64,2}[
     [1.0]',
     [0.3 0.5 0.2],  # Transition probabilities between the 3 demand states
     I,  # put here an identity matrix
+    [0.3 0.5 0.2
+        0.3 0.5 0.2
+        0.3 0.5 0.2],
+    I,
     [0.3 0.5 0.2
         0.3 0.5 0.2
         0.3 0.5 0.2],
@@ -274,6 +279,16 @@ model = SDDP.MarkovianPolicyGraph(
             )
             @constraint(sp, [tech in technologies],
                 cap_invest_s5[tech].out == cap_invest_s5[tech].in + u_expansion_tech[tech]
+            )
+        elseif t == 7
+            @constraint(sp, [tech in technologies],
+                cap_invest_s1[tech].out == cap_invest_s1[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s3[tech].out == cap_invest_s3[tech].in
+            )
+            @constraint(sp, [tech in technologies],
+                cap_invest_s5[tech].out == cap_invest_s5[tech].in
             )
         end
 
@@ -422,7 +437,7 @@ model = SDDP.MarkovianPolicyGraph(
 end
 
 # Train the model
-SDDP.train(model; iteration_limit=100)
+SDDP.train(model; iteration_limit=150)
 
 # Retrieve results
 println("Optimal Cost: ", SDDP.calculate_bound(model))
