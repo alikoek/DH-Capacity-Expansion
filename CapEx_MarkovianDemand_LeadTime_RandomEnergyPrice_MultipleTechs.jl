@@ -73,6 +73,8 @@ c_efficiency = Dict(
     :HeatPump => 3.0  # Coefficient of Performance (COP)
 )
 
+salvage_fraction = 0.75
+
 # Emission factors (tCO2/MWh_th)
 c_emission_fac = Dict(
     :nat_gas => 0.2,
@@ -411,7 +413,7 @@ model = SDDP.MarkovianPolicyGraph(
                 ) * typical_hours[hour][:qty]
                 for hour in 1:n_typical_hours)
             # multiply by the 5-year block and discount factor
-            @stageobjective(sp, df * (T_years * expr_annual_cost - salvage))
+            @stageobjective(sp, df * (T_years * expr_annual_cost - salvage * salvage_fraction))
         end
     end
 end
