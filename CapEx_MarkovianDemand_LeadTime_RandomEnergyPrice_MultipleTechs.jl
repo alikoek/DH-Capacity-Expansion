@@ -17,7 +17,7 @@ technologies = [:CHP, :Boiler, :HeatPump]
 c_lifetime = Dict(
     :CHP => 2,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
-    :HeatPump => 1,   # only 1-year lifetime => retires quickly
+    :HeatPump => 2,   # only 1-year lifetime => retires quickly
 )
 
 # Operational Costs (€/MWh)
@@ -54,16 +54,16 @@ c_energy_carrier_price = Dict(
 
 # Maximum Additional Capacity (MW_th)
 c_max_additional_capacity = Dict(
-    :CHP => 100.0,
-    :Boiler => 100.0,
-    :HeatPump => 100.0
+    :CHP => 1000,
+    :Boiler => 1000,
+    :HeatPump => 1000
 )
 
 # Initial Capacities (MW_th)
 c_initial_capacity = Dict(
-    :CHP => 25,
-    :Boiler => 20,
-    :HeatPump => 5,
+    :CHP => 1800,
+    :Boiler => 750,
+    :HeatPump => 100,
 )
 
 # Efficiency (as a fraction)
@@ -137,6 +137,7 @@ c_base_demand_profile = [base_annual_demand * typical_hours[i][:value] for i in 
 c_base_demand_profile = round.(c_base_demand_profile)
 #sum(c_base_demand_profile[i] * typical_hours[i][:qty] for i in 1:n_typical_hours)
 
+maximum(c_base_demand_profile)
 # Penalty cost for unmet demand (€/MWh)
 c_penalty = 1000
 
@@ -225,7 +226,7 @@ model = SDDP.MarkovianPolicyGraph(
         # Define a dictionary of states that track expansions built at each 
         # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
         # cap_invest_s0 represents the initial capacities
-        0 <= cap_invest_s0[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
+        0 <= cap_invest_s0[tech in technologies] <= 3000, SDDP.State, (initial_value = c_initial_capacity[tech])
         # 0 <= x_capacity_tech[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
         0 <= cap_invest_s1[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
         0 <= cap_invest_s3[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
@@ -365,6 +366,30 @@ model = SDDP.MarkovianPolicyGraph(
         # Update the state variable for the cumulative demand multiplier.
         @constraint(sp, x_demand_mult.out == new_demand_mult)
 
+        # If this is the *final* stage (t=6 for T=3), include salvage for 
+        #  any capacity that extends beyond planning horizon.
+            local salvage = 0.0
+            if t == T * 2
+                for tech in technologies
+                    if (ceil(t/2) - 0) < c_lifetime[tech]
+                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 0)
+                        salvage += c_investment_cost[tech] * cap_invest_s0[tech].in * (remaning_life / c_lifetime[tech]) 
+                    end
+                    if (ceil(t/2) - 1) < c_lifetime[tech]
+                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 1)
+                        salvage += c_investment_cost[tech] * cap_invest_s1[tech].in * (remaning_life / c_lifetime[tech]) 
+                    end
+                    if (ceil(t/2) - 2) < c_lifetime[tech]
+                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 3)
+                        salvage += c_investment_cost[tech] * cap_invest_s3[tech].in * (remaning_life / c_lifetime[tech]) 
+                    end
+                    if (ceil(t/2) - 3) < c_lifetime[tech]
+                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 5)
+                        salvage += c_investment_cost[tech] * cap_invest_s5[tech].in * (remaning_life / c_lifetime[tech]) 
+                    end
+                end
+            end 
+
         ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
             # discount factor for this stage
@@ -386,7 +411,7 @@ model = SDDP.MarkovianPolicyGraph(
                 ) * typical_hours[hour][:qty]
                 for hour in 1:n_typical_hours)
             # multiply by the 5-year block and discount factor
-            @stageobjective(sp, df * T_years * expr_annual_cost)
+            @stageobjective(sp, df * (T_years * expr_annual_cost - salvage))
         end
     end
 end
