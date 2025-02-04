@@ -5,8 +5,8 @@ using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statis
 ##############################################################################
 
 # Problem Data
-T = 3  # Total number of model years --> 2025, 2030, 2035
-T_years = 5 # number of years represented by the mmodel years
+T = 4  # Total number of model years --> 2025, 2030, 2035
+T_years = 10 # number of years represented by the mmodel years
 
 # Technological parameters
 # Technology Names
@@ -370,27 +370,30 @@ model = SDDP.MarkovianPolicyGraph(
 
         # If this is the *final* stage (t=6 for T=3), include salvage for 
         #  any capacity that extends beyond planning horizon.
-            local salvage = 0.0
-            if t == T * 2
-                for tech in technologies
-                    if (ceil(t/2) - 0) < c_lifetime[tech]
-                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 0)
-                        salvage += c_investment_cost[tech] * cap_invest_s0[tech].in * (remaning_life / c_lifetime[tech]) 
-                    end
-                    if (ceil(t/2) - 1) < c_lifetime[tech]
-                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 1)
-                        salvage += c_investment_cost[tech] * cap_invest_s1[tech].in * (remaning_life / c_lifetime[tech]) 
-                    end
-                    if (ceil(t/2) - 2) < c_lifetime[tech]
-                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 3)
-                        salvage += c_investment_cost[tech] * cap_invest_s3[tech].in * (remaning_life / c_lifetime[tech]) 
-                    end
-                    if (ceil(t/2) - 3) < c_lifetime[tech]
-                        remaning_life = c_lifetime[tech] - (ceil(t/2) - 5)
-                        salvage += c_investment_cost[tech] * cap_invest_s5[tech].in * (remaning_life / c_lifetime[tech]) 
-                    end
+        local salvage = 0.0
+        if t == T * 2
+            for tech in technologies
+                # if current year - investment year < lifetime
+                if (ceil(t / 2) - 0) < c_lifetime[tech]
+                    # calculate remaning_life
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 0)
+                    # calculate salvage value
+                    salvage += c_investment_cost[tech] * cap_invest_s0[tech].in * (remaning_life / c_lifetime[tech])
                 end
-            end 
+                if (ceil(t / 2) - 1) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 1)
+                    salvage += c_investment_cost[tech] * cap_invest_s1[tech].in * (remaning_life / c_lifetime[tech])
+                end
+                if (ceil(t / 2) - 2) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 2)
+                    salvage += c_investment_cost[tech] * cap_invest_s3[tech].in * (remaning_life / c_lifetime[tech])
+                end
+                if (ceil(t / 2) - 3) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 3)
+                    salvage += c_investment_cost[tech] * cap_invest_s5[tech].in * (remaning_life / c_lifetime[tech])
+                end
+            end
+        end
 
         ### Stage objective (operational costs) ###
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
@@ -469,6 +472,51 @@ for t in 1:(T*2)
         total_unmet = sum(value(sp[:u_unmet][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
         println("  Total Production = ", total_production)
         println("  Total Unmet Demand = ", total_unmet)
+        local salvage = 0.0
+        if t == T * 2
+            for tech in technologies
+                # if current year - investment year < lifetime
+                if (ceil(t / 2) - 0) < c_lifetime[tech]
+                    println(" The investment year is 0")
+                    # calculate remaning_life
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 0)
+                    println("   Remaining Life of $tech = ", remaning_life)
+                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s0][tech].in))
+                    # calculate salvage value
+                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s0][tech].in) * (remaning_life / c_lifetime[tech])
+                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s0][tech].in) * (remaning_life / c_lifetime[tech]))
+                    println("********************************")
+                end
+                if (ceil(t / 2) - 1) < c_lifetime[tech]
+                    println(" The investment year is 1")
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 1)
+                    println("   Remaining Life of $tech = ", remaning_life)
+                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s1][tech].in))
+                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s1][tech].in) * (remaning_life / c_lifetime[tech])
+                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s1][tech].in) * (remaning_life / c_lifetime[tech]))
+                    println("********************************")
+                end
+                if (ceil(t / 2) - 2) < c_lifetime[tech]
+                    println(" The investment year is 2")
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 2)
+                    println("   Remaining Life of $tech = ", remaning_life)
+                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s3][tech].in))
+                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s3][tech].in) * (remaning_life / c_lifetime[tech])
+                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s3][tech].in) * (remaning_life / c_lifetime[tech]))
+                    println("********************************")
+                end
+                if (ceil(t / 2) - 3) < c_lifetime[tech]
+                    println(" The investment year is 3")
+                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 3)
+                    println("   Remaining Life of $tech = ", remaning_life)
+                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s5][tech].in))
+                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s5][tech].in) * (remaning_life / c_lifetime[tech])
+                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s5][tech].in) * (remaning_life / c_lifetime[tech]))
+                    println("********************************")
+                end
+            end
+        end
+        println("  Total Salvage Value = ", salvage * salvage_fraction)
     end
 end
 
