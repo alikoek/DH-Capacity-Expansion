@@ -151,7 +151,7 @@ c_base_demand_profile = round.(c_base_demand_profile)
 
 maximum(c_base_demand_profile)
 # Penalty cost for unmet demand (€/MWh)
-c_penalty = 10000
+c_penalty = 100000
 
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
@@ -515,6 +515,7 @@ for t in 1:(T*2)
         end
     else  # Operational stages
         println("Year $(div(t, 2)) - Operational Stage")
+        println("Noise term: ", value(sp[:noise_term]))
         println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
         println("   Annual Demand = ", sum(c_base_demand_profile[i] * value(sp[:x_demand_mult].out) * typical_hours[i][:qty] for i in 1:n_typical_hours))
         for tech in technologies
@@ -628,3 +629,30 @@ SDDP.plot(plt, "spaghetti_plot.html")
 last_dispatch = [sum(value(simulations[i][6][:u_production][hour]) for hour in 1:c_hours) for i in 1:100]
 # get the unique values of the last dispatch
 unique_dispatch = unique(last_dispatch)
+
+# policy_graph = SDDP.get_policy_graph(model)
+# # policy_graph is typically a dictionary or custom structure mapping nodes to decisions.
+# for (node, decisions) in policy_graph
+#     println("Node: ", node, " Decisions: ", decisions)
+# end
+
+Plots.plot(
+    SDDP.publication_plot(simulations; title="Expansion") do data
+        return data[:u_expansion_tech][:HeatPump]
+    end,
+    SDDP.publication_plot(simulations; title="Thermal generation") do data
+        return sum((data[:u_production_tech][:HeatPump, hour]) for hour in 1:n_typical_hours)
+    end;
+    xlabel="Stage",
+    # ylims = (0, 200),
+    layout=(1, 2),
+)
+
+Plots.plot(
+    SDDP.publication_plot(simulations; title="Objective") do data
+        return data[:stage_objective]
+    end,
+    xlabel="Stage",
+    # ylims = (0, 200),
+    # layout = (1, 2),
+)
