@@ -5,7 +5,7 @@ using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statis
 ##############################################################################
 
 # Problem Data
-T = 4  # Total number of model years --> 2025, 2030, 2035
+T = 4  # Total number of model years --> 2020, 2030, 2040, 2050
 T_years = 10 # number of years represented by the mmodel years
 
 # Technological parameters
@@ -14,10 +14,16 @@ technologies = [:CHP, :Boiler, :HeatPump]
 
 # Lifetime in "years" (or pairs of stages)
 # e.g., lifetime[:CHP] = 2 means "2 years" of operational usage
-c_lifetime = Dict(
+c_lifetime_new = Dict(
     :CHP => 2,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
-    :HeatPump => 2,   # only 1-year lifetime => retires quickly
+    :HeatPump => 3,   # only 1-year lifetime => retires quickly
+)
+# Remaining lifetime of the existing capacities
+c_lifetime_initial = Dict(
+    :CHP => 2,
+    :Boiler => 1,
+    :HeatPump => 2
 )
 
 # Operational Costs (€/MWh)
@@ -193,14 +199,14 @@ price_probabilities_normalized = price_probabilities / sum(price_probabilities)
 # Function to check if capacity built at investment stage s_invest 
 # is still alive at current stage s_current.
 ##############################################################################
-function is_alive(s_invest::Int, s_current::Int, tech::Symbol)
+function is_alive(s_invest::Int, s_current::Int, lifetime::Dict, tech::Symbol)
     # The "year" index for s_invest is ceil(s_invest/2).
     # The "year" index for s_current is  ceil(s_current/2).
     year_invest = ceil(s_invest / 2)
     year_current = ceil(s_current / 2)
     # If lifetime[tech] = L, that means capacity is alive for L "years" 
     # after it's built (starting from the year built + 1 --> ensures lead time of 1 model year (5 year representation)).
-    return (1 <= (year_current - year_invest)) && ((year_current - year_invest) <= c_lifetime[tech])
+    return (1 <= (year_current - year_invest)) && ((year_current - year_invest) <= lifetime[tech])
 end
 
 ##############################################################################
@@ -306,16 +312,16 @@ model = SDDP.MarkovianPolicyGraph(
         for tech in technologies
             # sum capacity from stages 1,3,5 that is alive
             # in the "year" = ceil(t/2).
-            if is_alive(0, t, tech)
+            if is_alive(0, t, c_lifetime_initial, tech)
                 expr_opex_fix += c_opex_fixed[tech] * cap_invest_s0[tech].in
             end
-            if is_alive(1, t, tech)
+            if is_alive(1, t, c_lifetime_new, tech)
                 expr_opex_fix += c_opex_fixed[tech] * cap_invest_s1[tech].in
             end
-            if is_alive(3, t, tech)
+            if is_alive(3, t, c_lifetime_new, tech)
                 expr_opex_fix += c_opex_fixed[tech] * cap_invest_s3[tech].in
             end
-            if is_alive(5, t, tech)
+            if is_alive(5, t, c_lifetime_new, tech)
                 expr_opex_fix += c_opex_fixed[tech] * cap_invest_s5[tech].in
             end
         end
@@ -325,6 +331,7 @@ model = SDDP.MarkovianPolicyGraph(
 
         ################### Operational stage (even-numbered stages) ###################
     else
+        model_year = Int(ceil(t / 2))
         # ensure that annual demand is not changed in the first year
         if t == 2
             new_demand_mult = 1.0
@@ -346,16 +353,16 @@ model = SDDP.MarkovianPolicyGraph(
         capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
         for tech in technologies
             capacity_expr = 0.0
-            if is_alive(0, t, tech)
+            if is_alive(0, t, c_lifetime_initial, tech)
                 capacity_expr += cap_invest_s0[tech].in
             end
-            if is_alive(1, t, tech)
+            if is_alive(1, t, c_lifetime_new, tech)
                 capacity_expr += cap_invest_s1[tech].in
             end
-            if is_alive(3, t, tech)
+            if is_alive(3, t, c_lifetime_new, tech)
                 capacity_expr += cap_invest_s3[tech].in
             end
-            if is_alive(5, t, tech)
+            if is_alive(5, t, c_lifetime_new, tech)
                 capacity_expr += cap_invest_s5[tech].in
             end
             capacity_alive[tech] = capacity_expr
@@ -389,22 +396,22 @@ model = SDDP.MarkovianPolicyGraph(
         if t == T * 2
             for tech in technologies
                 # if current year - investment year < lifetime
-                if (ceil(t / 2) - 0) < c_lifetime[tech]
+                if (model_year - 0) < c_lifetime[tech]
                     # calculate remaning_life
-                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 0)
+                    remaning_life = c_lifetime[tech] - (model_year - 0)
                     # calculate salvage value
                     salvage += c_investment_cost[tech] * cap_invest_s0[tech].in * (remaning_life / c_lifetime[tech])
                 end
-                if (ceil(t / 2) - 1) < c_lifetime[tech]
-                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 1)
+                if (model_year - 1) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (model_year - 1)
                     salvage += c_investment_cost[tech] * cap_invest_s1[tech].in * (remaning_life / c_lifetime[tech])
                 end
-                if (ceil(t / 2) - 2) < c_lifetime[tech]
-                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 2)
+                if (model_year - 2) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (model_year - 2)
                     salvage += c_investment_cost[tech] * cap_invest_s3[tech].in * (remaning_life / c_lifetime[tech])
                 end
-                if (ceil(t / 2) - 3) < c_lifetime[tech]
-                    remaning_life = c_lifetime[tech] - (ceil(t / 2) - 3)
+                if (model_year - 3) < c_lifetime[tech]
+                    remaning_life = c_lifetime[tech] - (model_year - 3)
                     salvage += c_investment_cost[tech] * cap_invest_s5[tech].in * (remaning_life / c_lifetime[tech])
                 end
             end
@@ -469,16 +476,16 @@ for t in 1:(T*2)
         for tech in technologies
             # sum expansions from s=1,3,5 that are alive
             local capacity_alive = 0.0
-            if is_alive(0, t, tech)
+            if is_alive(0, t, c_lifetime_initial, tech)
                 capacity_alive += value(sp[:cap_invest_s0][tech].in)
             end
-            if is_alive(1, t, tech)
+            if is_alive(1, t, c_lifetime_new, tech)
                 capacity_alive += value(sp[:cap_invest_s1][tech].in)
             end
-            if is_alive(3, t, tech)
+            if is_alive(3, t, c_lifetime_new, tech)
                 capacity_alive += value(sp[:cap_invest_s3][tech].in)
             end
-            if is_alive(5, t, tech)
+            if is_alive(5, t, c_lifetime_new, tech)
                 capacity_alive += value(sp[:cap_invest_s5][tech].in)
             end
             println("    $tech alive Capacity = ", capacity_alive)
