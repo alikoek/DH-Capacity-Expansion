@@ -72,11 +72,19 @@ c_initial_capacity = Dict(
     :HeatPump => 100,
 )
 
-# Efficiency (as a fraction)
-c_efficiency = Dict(
-    :CHP => 0.9,
+# Efficiencies (as a fraction)
+# Thermal efficiency
+c_efficiency_th = Dict(
+    :CHP => 0.55,
     :Boiler => 0.85,
-    :HeatPump => 3.0  # Coefficient of Performance (COP)
+    :HeatPump => 3.0
+)
+
+# Electrical efficiency
+c_efficiency_el = Dict(
+    :CHP => 0.4,
+    :Boiler => 0.0,
+    :HeatPump => 0.0
 )
 
 salvage_fraction = 1
@@ -152,6 +160,41 @@ c_penalty = 1000
 
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
+
+############## Process electricity prices into typical hours ##################
+filename_elec_2030 = joinpath(@__DIR__, "ElectricityPrice2030.csv")
+elec_price_2030 = CSV.read(filename_elec_2030, DataFrames.DataFrame, delim=",", decimal='.')
+elec_price_2030 = collect(elec_price_2030[:, "price"])
+sale_elec_price_2030 = round.(elec_price_2030, digits=2)
+purch_elec_price_2030 = elec_price_2030 .+ 50
+
+filename_elec_2050 = joinpath(@__DIR__, "ElectricityPrice2050.csv")
+elec_price_2050 = CSV.read(filename_elec_2050, DataFrames.DataFrame, delim=",", decimal='.')
+elec_price_2050 = collect(elec_price_2050[:, "price"])
+sale_elec_price_2050 = round.(elec_price_2050, digits=2)
+purch_elec_price_2050 = elec_price_2050 .+ 50
+
+typical_hour_indices = second_component
+n_original_hours = length(load_profile)
+
+# Initialize typical electricity prices for 2030 and 2050
+elec_price_2030_typical = zeros(n_typical_hours)
+elec_price_2050_typical = zeros(n_typical_hours)
+
+unique(second_component)
+sort(unique(second_component))
+
+for i in 1:n_typical_hours
+    hours_in_cluster = findall(x -> x == i, typical_hour_indices)
+    c_purch_elec_price_2030_typical[i] = mean(purch_elec_price_2030[hours_in_cluster])
+    c_purch_elec_price_2050_typical[i] = mean(purch_elec_price_2050[hours_in_cluster])
+    c_sale_elec_price_2030_typical[i] = mean(sale_elec_price_2030[hours_in_cluster])
+    c_sale_elec_price_2050_typical[i] = mean(sale_elec_price_2050[hours_in_cluster])
+end
+
+# plot(purch_elec_price_2030[hours_in_cluster])
+# mean(purch_elec_price_2030[hours_in_cluster])
+# median(purch_elec_price_2030[hours_in_cluster])
 
 ##############################################################################
 # MarkovianPolicyGraph: Demand transitions + Root distribution
@@ -421,16 +464,20 @@ model = SDDP.MarkovianPolicyGraph(
         SDDP.parameterize(sp, price_values, price_probabilities_normalized) do ω
             # discount factor for this stage
             local df = discount_factor(t, T_years)
+            # Determine the relevant electricity purchase and sale price for the current model year
+            local purch_elec_price = model_year <= 2 ? c_purch_elec_price_2030_typical : c_purch_elec_price_2050_typical
+            local sale_elec_price = model_year <= 2 ? c_sale_elec_price_2030_typical : c_sale_elec_price_2050_typical
 
             local expr_annual_cost = sum(
                 (
                     sum(
                         c_opex_var[tech] * u_production_tech[tech, hour] #O&M
                         + (
-                            (c_energy_carrier[tech] == :nat_gas ? ω : c_energy_carrier_price[c_energy_carrier[tech]])
-                            + c_carbon_price[ceil(t / 2)] * c_emission_fac[c_energy_carrier[tech]]
+                            (c_energy_carrier[tech] == :nat_gas ? ω : purch_elec_price[hour]) # random energy price | electricity price
+                            + c_carbon_price[model_year] * c_emission_fac[c_energy_carrier[tech]] # carbon price
+                            - c_efficiency_el[tech] * sale_elec_price[hour] # electricity revenue
                         )
-                        * (u_production_tech[tech, hour] / c_efficiency[tech]
+                        * (u_production_tech[tech, hour] / c_efficiency_th[tech] # primary energy conversion
                         )
                         for tech in technologies
                     )
