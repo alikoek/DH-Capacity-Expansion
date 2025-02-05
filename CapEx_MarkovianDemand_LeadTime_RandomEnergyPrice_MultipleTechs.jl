@@ -17,34 +17,34 @@ technologies = [:CHP, :Boiler, :HeatPump]
 c_lifetime_new = Dict(
     :CHP => 2,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
-    :HeatPump => 3,   # only 1-year lifetime => retires quickly
+    :HeatPump => 2,   # only 1-year lifetime => retires quickly
 )
 # Remaining lifetime of the existing capacities
 c_lifetime_initial = Dict(
-    :CHP => 2,
+    :CHP => 1,
     :Boiler => 1,
     :HeatPump => 2
 )
 
 # Operational Costs (€/MWh)
 c_opex_var = Dict(
-    :CHP => 30.0,
-    :Boiler => 10.0,
-    :HeatPump => 20.0
+    :CHP => 5.0,
+    :Boiler => 0.75,
+    :HeatPump => 1.1
 )
 
 # Investment Costs (€/MW_th)
 c_investment_cost = Dict(
-    :CHP => 1000.0,
-    :Boiler => 500.0,
-    :HeatPump => 800.0
+    :CHP => 2048825,
+    :Boiler => 44528,
+    :HeatPump => 591052
 )
 
 # Fixed O&M Costs (€/MW_th per year)
 c_opex_fixed = Dict(
-    :CHP => 50.0,
-    :Boiler => 30.0,
-    :HeatPump => 40.0
+    :CHP => 43297,
+    :Boiler => 1193,
+    :HeatPump => 3316
 )
 
 c_energy_carrier = Dict(
@@ -53,36 +53,31 @@ c_energy_carrier = Dict(
     :HeatPump => :elec
 )
 
-# Energy carrier prices (€/MWh)
-c_energy_carrier_price = Dict(
-    :elec => 100
-)
-
 # Maximum Additional Capacity (MW_th)
 c_max_additional_capacity = Dict(
-    :CHP => 1000,
-    :Boiler => 1000,
-    :HeatPump => 1000
+    :CHP => 500,
+    :Boiler => 500,
+    :HeatPump => 500
 )
 
 # Initial Capacities (MW_th)
 c_initial_capacity = Dict(
-    :CHP => 1800,
-    :Boiler => 750,
+    :CHP => 400,
+    :Boiler => 350,
     :HeatPump => 100,
 )
 
 # Efficiencies (as a fraction)
 # Thermal efficiency
 c_efficiency_th = Dict(
-    :CHP => 0.55,
-    :Boiler => 0.85,
+    :CHP => 0.4,
+    :Boiler => 0.9,
     :HeatPump => 3.0
 )
 
 # Electrical efficiency
 c_efficiency_el = Dict(
-    :CHP => 0.4,
+    :CHP => 0.5,
     :Boiler => 0.0,
     :HeatPump => 0.0
 )
@@ -97,10 +92,10 @@ c_emission_fac = Dict(
 
 # Carbon Price (€/t) for years
 c_carbon_price = Dict(
-    1 => 50,
-    2 => 150,
-    3 => 250,
-    4 => 350
+    1 => 100,
+    2 => 200,
+    3 => 300,
+    4 => 400
 )
 
 # Function to get discount factor for stage t.
@@ -146,7 +141,7 @@ plot(sort(load_profile_normalized), label="Original", title="Approximation versu
 plot!(sort(quants[second_component[:]]), label="approximation")
 
 # Base annual demand
-base_annual_demand = 6.5e6 # MWh
+base_annual_demand = 2e6 # MWh
 
 # Compute the absolute demand profile for the first year.
 # For each typical hour, the demand is the base annual demand scaled by the normalized value.
@@ -156,7 +151,7 @@ c_base_demand_profile = round.(c_base_demand_profile)
 
 maximum(c_base_demand_profile)
 # Penalty cost for unmet demand (€/MWh)
-c_penalty = 1000
+c_penalty = 10000
 
 # Define the stochastic demand multipliers: +10%, no change, -10%
 demand_multipliers = [1.1, 1.0, 0.9]
@@ -234,7 +229,7 @@ price_volatility = 10.0  # Standard deviation
 μ_normal = log(mean_price^2 / sqrt(price_volatility^2 + mean_price^2))
 σ_normal = sqrt(log(1 + (price_volatility / mean_price)^2))
 price_distribution = LogNormal(μ_normal, σ_normal)
-num_price_scenarios = 10
+num_price_scenarios = 4
 price_quantiles = range(0.05, 0.95; length=num_price_scenarios)
 price_values = quantile.(price_distribution, price_quantiles)
 price_probabilities = pdf(price_distribution, price_values)
@@ -499,7 +494,7 @@ SDDP.train(model; iteration_limit=150)
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 2, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 100, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
@@ -595,12 +590,12 @@ end
 plt = SDDP.SpaghettiPlot(simulations)
 
 for tech in technologies
-    SDDP.add_spaghetti(plt; title="Capacity_in_$tech") do data
-        return data[:x_capacity_tech][tech].in
-    end
-    SDDP.add_spaghetti(plt; title="Capacity_out_$tech") do data
-        return data[:x_capacity_tech][tech].out
-    end
+    # SDDP.add_spaghetti(plt; title="Capacity_in_$tech") do data
+    #     return data[:x_capacity_tech][tech].in
+    # end
+    # SDDP.add_spaghetti(plt; title="Capacity_out_$tech") do data
+    #     return data[:x_capacity_tech][tech].out
+    # end
     SDDP.add_spaghetti(plt; title="Expansion_$tech") do data
         return data[:u_expansion_tech][tech]
     end
@@ -609,14 +604,20 @@ for tech in technologies
     end
 end
 
-SDDP.add_spaghetti(plt; title="Annual Demand_in") do data
-    return data[:x_annual_demand].in
+# SDDP.add_spaghetti(plt; title="Annual Demand_in") do data
+#     return data[:x_annual_demand].in
+# end
+# SDDP.add_spaghetti(plt; title="Annual Demand_out") do data
+#     return data[:x_annual_demand].out
+# end
+SDDP.add_spaghetti(plt; title="Demand Multiplier_in") do data
+    return data[:x_demand_mult].in
 end
-SDDP.add_spaghetti(plt; title="Annual Demand_out") do data
-    return data[:x_annual_demand].out
+SDDP.add_spaghetti(plt; title="Demand Multiplier_out") do data
+    return data[:x_demand_mult].out
 end
 SDDP.add_spaghetti(plt; title="Total Production") do data
-    return sum(sum((data[:u_production_tech][tech, hour]) for hour in 1:c_hours) for tech in technologies)
+    return sum(sum((data[:u_production_tech][tech, hour]) for hour in 1:n_typical_hours) for tech in technologies)
 end
 SDDP.add_spaghetti(plt; title="Unmet Demand") do data
     return sum(data[:u_unmet])
