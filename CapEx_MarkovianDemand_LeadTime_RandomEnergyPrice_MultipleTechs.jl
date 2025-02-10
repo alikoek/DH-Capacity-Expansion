@@ -1,4 +1,4 @@
-using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statistics
+using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statistics, StatsPlots
 
 ##############################################################################
 # Basic Setup
@@ -10,76 +10,86 @@ T_years = 10 # number of years represented by the mmodel years
 
 # Technological parameters
 # Technology Names
-technologies = [:CHP, :Boiler, :HeatPump]
+technologies = [:CHP, :Boiler, :HeatPump, :Geothermal]
 
 # Lifetime in "years" (or pairs of stages)
 # e.g., lifetime[:CHP] = 2 means "2 years" of operational usage
 c_lifetime_new = Dict(
-    :CHP => 2,
+    :CHP => 3,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
     :HeatPump => 2,   # only 1-year lifetime => retires quickly
+    :Geothermal => 3
 )
 # Remaining lifetime of the existing capacities
 c_lifetime_initial = Dict(
-    :CHP => 1,
+    :CHP => 2,
     :Boiler => 1,
-    :HeatPump => 2
+    :HeatPump => 2,
+    :Geothermal => 0
 )
 
 # Operational Costs (€/MWh)
 c_opex_var = Dict(
-    :CHP => 5.0,
+    :CHP => 3.3,
     :Boiler => 0.75,
-    :HeatPump => 1.1
+    :HeatPump => 1.1,
+    :Geothermal => 0.5
 )
 
 # Investment Costs (€/MW_th)
 c_investment_cost = Dict(
-    :CHP => 2048825,
-    :Boiler => 44528,
-    :HeatPump => 591052
+    :CHP => 1100000,
+    :Boiler => 100000,
+    :HeatPump => 591052,
+    :Geothermal => 1000000
 )
 
 # Fixed O&M Costs (€/MW_th per year)
 c_opex_fixed = Dict(
-    :CHP => 43297,
-    :Boiler => 1193,
-    :HeatPump => 3316
+    :CHP => 15000,
+    :Boiler => 2000,
+    :HeatPump => 3000,
+    :Geothermal => 2000
 )
 
 c_energy_carrier = Dict(
     :CHP => :nat_gas,
     :Boiler => :nat_gas,
-    :HeatPump => :elec
+    :HeatPump => :elec,
+    :Geothermal => :geothermal
 )
 
 # Maximum Additional Capacity (MW_th)
 c_max_additional_capacity = Dict(
     :CHP => 500,
     :Boiler => 500,
-    :HeatPump => 500
+    :HeatPump => 250,
+    :Geothermal => 100
 )
 
 # Initial Capacities (MW_th)
 c_initial_capacity = Dict(
-    :CHP => 400,
+    :CHP => 500,
     :Boiler => 350,
-    :HeatPump => 100,
+    :HeatPump => 0,
+    :Geothermal => 0
 )
 
 # Efficiencies (as a fraction)
 # Thermal efficiency
 c_efficiency_th = Dict(
-    :CHP => 0.4,
+    :CHP => 0.44,
     :Boiler => 0.9,
-    :HeatPump => 3.0
+    :HeatPump => 3.0,
+    :Geothermal => 1.0
 )
 
 # Electrical efficiency
 c_efficiency_el = Dict(
-    :CHP => 0.5,
+    :CHP => 0.43,
     :Boiler => 0.0,
-    :HeatPump => 0.0
+    :HeatPump => 0.0,
+    :Geothermal => 0.0
 )
 
 salvage_fraction = 1
@@ -88,14 +98,15 @@ salvage_fraction = 1
 c_emission_fac = Dict(
     :nat_gas => 0.2,
     :elec => 0,
+    :geothermal => 0
 )
 
 # Carbon Price (€/t) for years
 c_carbon_price = Dict(
-    1 => 100,
-    2 => 200,
-    3 => 300,
-    4 => 400
+    1 => 50,
+    2 => 150,
+    3 => 250,
+    4 => 350
 )
 
 # Function to get discount factor for stage t.
@@ -160,13 +171,13 @@ demand_multipliers = [1.1, 1.0, 0.9]
 filename_elec_2030 = joinpath(@__DIR__, "ElectricityPrice2030.csv")
 elec_price_2030 = CSV.read(filename_elec_2030, DataFrames.DataFrame, delim=",", decimal='.')
 elec_price_2030 = collect(elec_price_2030[:, "price"])
-sale_elec_price_2030 = round.(elec_price_2030, digits=2)
+sale_elec_price_2030 = round.(elec_price_2030, digits=2) * 1.5
 purch_elec_price_2030 = elec_price_2030 .+ 50
 
 filename_elec_2050 = joinpath(@__DIR__, "ElectricityPrice2050.csv")
 elec_price_2050 = CSV.read(filename_elec_2050, DataFrames.DataFrame, delim=",", decimal='.')
 elec_price_2050 = collect(elec_price_2050[:, "price"])
-sale_elec_price_2050 = round.(elec_price_2050, digits=2)
+sale_elec_price_2050 = round.(elec_price_2050, digits=2) * 1.5
 purch_elec_price_2050 = elec_price_2050 .+ 50
 
 typical_hour_indices = second_component
@@ -470,9 +481,10 @@ model = SDDP.MarkovianPolicyGraph(
                     sum(
                         c_opex_var[tech] * u_production_tech[tech, hour] #O&M
                         + (
-                            (c_energy_carrier[tech] == :nat_gas ? ω : purch_elec_price[hour]) # random energy price | electricity price
-                            + c_carbon_price[model_year] * c_emission_fac[c_energy_carrier[tech]] # carbon price
-                            - c_efficiency_el[tech] * sale_elec_price[hour] # electricity revenue
+                            (c_energy_carrier[tech] == :nat_gas ? ω :
+                             (c_energy_carrier[tech] == :geothermal ? 0.0 : purch_elec_price[hour]))
+                            + (c_carbon_price[model_year] * c_emission_fac[c_energy_carrier[tech]]) # carbon price
+                            - (c_efficiency_el[tech] * sale_elec_price[hour]) # electricity revenue
                         )
                         * (u_production_tech[tech, hour] / c_efficiency_th[tech] # primary energy conversion
                         )
@@ -488,17 +500,17 @@ model = SDDP.MarkovianPolicyGraph(
 end
 
 # Train the model
-SDDP.train(model; iteration_limit=150)
+SDDP.train(model; iteration_limit=1000)
 
 # Retrieve results
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
 # Simulation
-simulations = SDDP.simulate(model, 100, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
+simulations = SDDP.simulate(model, 400, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
 
 # Print simulation results
 for t in 1:(T*2)
-    sp = simulations[1][t]
+    sp = simulations[3][t]
     if t % 2 == 1  # Investment stages (odd stages)
         println("Year $(div(t + 1, 2)) - Investment Stage")
         for tech in technologies
@@ -587,7 +599,11 @@ for t in 1:(T*2)
     end
 end
 
-
+##############################################################################
+# Visulaizations
+##############################################################################
+################################# Spaghetti Plot #############################
+##############################################################################
 plt = SDDP.SpaghettiPlot(simulations)
 
 for tech in technologies
@@ -605,12 +621,7 @@ for tech in technologies
     end
 end
 
-# SDDP.add_spaghetti(plt; title="Annual Demand_in") do data
-#     return data[:x_annual_demand].in
-# end
-# SDDP.add_spaghetti(plt; title="Annual Demand_out") do data
-#     return data[:x_annual_demand].out
-# end
+
 SDDP.add_spaghetti(plt; title="Demand Multiplier_in") do data
     return data[:x_demand_mult].in
 end
@@ -626,16 +637,7 @@ end
 
 SDDP.plot(plt, "spaghetti_plot.html")
 
-last_dispatch = [sum(value(simulations[i][6][:u_production][hour]) for hour in 1:c_hours) for i in 1:100]
-# get the unique values of the last dispatch
-unique_dispatch = unique(last_dispatch)
-
-# policy_graph = SDDP.get_policy_graph(model)
-# # policy_graph is typically a dictionary or custom structure mapping nodes to decisions.
-# for (node, decisions) in policy_graph
-#     println("Node: ", node, " Decisions: ", decisions)
-# end
-
+############################## Publication Plot ################################
 Plots.plot(
     SDDP.publication_plot(simulations; title="Expansion") do data
         return data[:u_expansion_tech][:HeatPump]
@@ -656,3 +658,215 @@ Plots.plot(
     # ylims = (0, 200),
     # layout = (1, 2),
 )
+####################################################################################
+##############################  Manual band plot ###################################
+####################################################################################
+function plot_bands(data, title, xticks, xlabel, ylabel)
+    # Compute statistics for each column (apply quantile to each column)
+    x_values = xticks  # Column indices as x-axis
+    q5 = [quantile(data[:, i], 0.05) for i in 1:size(data, 2)]
+    q25 = [quantile(data[:, i], 0.25) for i in 1:size(data, 2)]
+    q50 = [quantile(data[:, i], 0.50) for i in 1:size(data, 2)]  # Median (50th percentile)
+    q75 = [quantile(data[:, i], 0.75) for i in 1:size(data, 2)]
+    q95 = [quantile(data[:, i], 0.95) for i in 1:size(data, 2)]
+    # Create plot
+    p = plot(x_values, q5, fillrange=q95, fillalpha=0.15, c=2, label="5-95", legend=:topleft, lw=0)
+    plot!(x_values, q25, fillrange=q75, fillalpha=0.35, c=2, label="25-75", legend=:topleft, lw=0)
+    plot!(x_values, q95, fillalpha=0.15, c=2, label="", legend=:topleft, lw=0)
+    plot!(x_values, q75, fillalpha=0.35, c=2, label="", legend=:topleft, lw=0)
+    plot!(x_values, q50, label="Median (50th Percentile)", lw=2, color=2)  # Median line
+    # Labels and title
+    xlabel!(xlabel)
+    ylabel!(ylabel)
+    title!(title)
+    return(p)
+    # display()
+end
+
+for tech in technologies
+    total_cap_alive = zeros(length(simulations), T * 2)
+    for sim in (1:length(simulations))
+        for t in (1:T*2)
+            cap_alive = 0
+            if is_alive(0, t, c_lifetime_initial, tech)
+                cap_alive += value(simulations[sim][t][:cap_invest_s0][tech].in)
+            end
+            if is_alive(1, t, c_lifetime_new, tech)
+                cap_alive += value(simulations[sim][t][:cap_invest_s1][tech].in)
+            end
+            if is_alive(3, t, c_lifetime_new, tech)
+                cap_alive += value(simulations[sim][t][:cap_invest_s3][tech].in)
+            end
+            if is_alive(5, t, c_lifetime_new, tech)
+                cap_alive += value(simulations[sim][t][:cap_invest_s5][tech].in)
+            end
+            total_cap_alive[sim, t] = cap_alive
+        end
+    end
+    fig = plot_bands(total_cap_alive, "$tech Alive Capacities", 1:8, "Stages", "Capacity [MW_th]")
+    display(fig)
+    savefig("AliveCapacities_$tech.png")
+end
+
+
+for tech in technologies
+    inv_stages = collect(1:2:T*2)
+    u_invs = zeros(length(simulations), length(inv_stages))
+    for sim in (1:length(simulations))
+        counter = 1
+        for t in inv_stages
+            u_inv = value(simulations[sim][t][:u_expansion_tech][tech])
+            u_invs[sim, counter] = u_inv
+            counter += 1
+        end
+    end
+    fig = plot_bands(u_invs, "$tech Investment", 1:4, "Investment Stages", "Investment [MW_th]")
+    display(fig)
+    savefig("Investments_$tech.png")
+end
+####################################################################################
+##############################  Load Duration Curve ################################
+####################################################################################
+n_sim = 2
+
+plt = plot(title="Simulation $n_sim - Operation Stage Load Duration Curve", xlabel="Hours", ylabel="Production [MW_th]", legend=:topleft)
+y0 = zeros(8760 * T, length(technologies))
+labels = Vector{String}()
+
+sorted_keys = sort(collect(c_opex_var), by=x -> x[2], rev=true)  # Sort by value descending
+enumerated_keys = [pair[1] for pair in sorted_keys]  # Extract sorted keys
+println(enumerated_keys)
+for (index, tech) in enumerate(enumerated_keys)
+    for t_prim in 1:(T)
+        t = 2 * t_prim
+        sp = simulations[n_sim][t]
+        total_unmet = sum(value(sp[:u_unmet][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
+        y0[1+8760*(t_prim-1):8760*t_prim, index] = sort(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]])
+        prod_tot = (sum(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]]))
+        # vline(1+8760*(t_prim-1))
+        print(" $(tech) $(prod_tot)")
+        println()
+    end
+
+    push!(labels, String(tech))
+end
+# print(labels)
+# labels = string.(Any["CHP", "HeatPump", "Boiler"])
+# println(hcat(labels))
+areaplot!(y0, label=Matrix(reshape(labels, 1, length(labels))), fillalpha=[0.2 0.3 0.4], lw=0)
+display(plt)
+savefig("LoadDurationCurve_Simulation$n_sim.png")
+
+subp = simulations[n_sim][2]
+dict_keys = collect(keys(subp))
+[println(dict_keys[i]) for i in 1:length(dict_keys)]
+subp[:u_unmet]
+c_base_demand_profile
+minimum(c_base_demand_profile)
+
+
+tech = :HeatPump
+sort(Array(values(subp[:u_production_tech][tech, :]))[second_component[:]])
+dispatch = values(subp[:u_production_tech][tech, :])
+sum(dispatch)
+##############################################################################
+##############################  Violin Plots #################################
+##############################################################################
+# Create a violin plot for the total production of each technology at the operational stages
+function plot_violins(data, title, xlabels, y_legend)
+
+    # Prepare data for violin plot
+    group_labels = repeat(xlabels, inner=size(data, 1))  # Repeat each x-axis label for each data point
+    flattened_values = vec(data)  # Flatten the matrix into a single vector
+
+    # Overlay means points for each group
+    group_means = [mean(data[:, i]) for i in 1:size(data, 2)]
+    scatter(group_labels, flattened_values, color=:black, markershape=:o, label="samples", markersize=2)
+    # Create violin plot
+    violin!(group_labels, flattened_values,
+        xlabel="Periods", title=title, label="pdf",
+        legend=true, alpha=0.5, c=:green)
+    plot!(gridlinewidth=2)
+    scatter!(xlabels, group_means, color=:red, markershape=:o, label="Mean")
+
+    ylabel!(y_legend)
+
+end
+
+function plot_combined_violins(data1, data2, title, xlabels, y_legend)
+    # Prepare data for violin plot
+    group_labels = repeat(xlabels, inner=size(data1, 1))  # Repeat each x-axis label for each data point
+    flattened_values_1 = vec(data1)  # Flatten the matrix into a single vector
+    flattened_values_2 = vec(data2)  # Flatten the matrix into a single vector
+
+    # Overlay means points for each group
+    group_means = [mean(data2[:, i]) for i in 1:size(data1, 2)]
+    scatter(group_labels, flattened_values_2, color=:red, markershape=:o, label="mean cons", markersize=2, lw=0)
+    # Create violin plot
+    violin!(group_labels, flattened_values_1,
+        xlabel="Periods", title=title, label="pdf prod",
+        legend=true, alpha=0.5, c=:green, side=:right)
+    # dotplot!(group_labels, flattened_values_1, side=:right, color=:green, markershape=:o, label="samples", markersize = 2)
+    # Create violin plot
+    violin!(group_labels, flattened_values_2,
+        xlabel="Periods", title=title, label="pdf conso",
+        legend=true, alpha=0.5, c=:red, side=:left)
+    plot!(gridlinewidth=2)
+    # scatter!(xlabels, group_means, color=:red, markershape=:o, label="Mean")
+
+    ylabel!(y_legend)
+end
+
+### Demand ###
+xlabels = []
+ope_var_cons = zeros(length(simulations), T)
+for (ope_stage, stage) in enumerate(2:2:2*T)
+    push!(xlabels, "$(2020 + ope_stage*T_years) \n-> $(2020 + (ope_stage+1)*T_years )")
+    for sim in 1:length(simulations)
+        ope_var_cons[sim, ope_stage] = values(simulations[sim][stage][:x_demand_mult].out) * base_annual_demand
+    end
+end
+
+
+ope_var = zeros(length(simulations), T)
+# Boiler
+for (ope_stage, stage) in enumerate(2:2:2*T)
+    push!(xlabels, "$(2020 + ope_stage*T_years) \n-> $(2020 + (ope_stage+1)*T_years )")
+    for sim in 1:length(simulations)
+        ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:Boiler, :]))[second_component[:]]))
+    end
+end
+q1 = plot_combined_violins(ope_var, ope_var_cons, "Yearly boiler prod", xlabels, "Production in MWh")
+plot!(ylim=(0, upper_bound))
+
+# CHP
+for (ope_stage, stage) in enumerate(2:2:2*T)
+    for sim in 1:length(simulations)
+        ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:CHP, :]))[second_component[:]]))
+    end
+end
+q2 = plot_combined_violins(ope_var, ope_var_cons, "Yearly CHP prod", xlabels, "Production in MWh")
+plot!(ylim=(0, upper_bound))
+
+# HeatPump
+for (ope_stage, stage) in enumerate(2:2:2*T)
+    for sim in 1:length(simulations)
+        ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:HeatPump, :]))[second_component[:]]))
+    end
+end
+q3 = plot_combined_violins(ope_var, ope_var_cons, "Yearly Heat Pump production", xlabels, "Production in MWh")
+
+# Geothermal
+for (ope_stage, stage) in enumerate(2:2:2*T)
+    for sim in 1:length(simulations)
+        ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:Geothermal, :]))[second_component[:]]))
+    end
+end
+q4 = plot_combined_violins(ope_var, ope_var_cons, "Yearly Geothermal production", xlabels, "Production in MWh")
+
+
+plot!(ylim=(0, upper_bound))
+plot!(size=(1500, 500))
+l = @layout [a b c d]
+q = plot(q1, q2, q3, q4, layout=l)
+savefig("ViolinPlots_ProductionVsDemand.png")
