@@ -1,4 +1,4 @@
-using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statistics, StatsPlots
+using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statistics, StatsPlots, Random
 
 ##############################################################################
 # Basic Setup
@@ -6,11 +6,14 @@ using SDDP, Gurobi, LinearAlgebra, Distributions, CSV, DataFrames, Plots, Statis
 
 # Problem Data
 T = 4  # Total number of model years --> 2020, 2030, 2040, 2050
+
+# Investment stages (odd-numbered stages plus stage 0 for initial capacities)
+investment_stages = [0; collect(1:2:(2*T-1))]  # [0, 1, 3, 5, 7] for T=4
 T_years = 10 # number of years represented by the mmodel years
 
 # Technological parameters
 # Technology Names
-technologies = [:CHP, :Boiler, :HeatPump, :Geothermal]
+technologies = [:CHP, :Boiler, :HeatPump, :Geothermal, :ThermalStorage]
 
 # Lifetime in "years" (or pairs of stages)
 # e.g., lifetime[:CHP] = 2 means "2 years" of operational usage
@@ -18,30 +21,35 @@ c_lifetime_new = Dict(
     :CHP => 3,
     :Boiler => 3,     # e.g. 3-year lifetime => no retirement in 3-year horizon
     :HeatPump => 2,   # only 1-year lifetime => retires quickly
-    :Geothermal => 3
+    :Geothermal => 3,
+    :ThermalStorage => 4  # Long lifetime for thermal storage tanks
 )
 # Remaining lifetime of the existing capacities
 c_lifetime_initial = Dict(
     :CHP => 2,
     :Boiler => 1,
     :HeatPump => 2,
-    :Geothermal => 0
+    :Geothermal => 0,
+    :ThermalStorage => 0  # No initial thermal storage capacity
 )
 
 # Operational Costs (€/MWh)
 c_opex_var = Dict(
+    :Geothermal => 0.5,
+    :HeatPump => 1.1,
     :CHP => 3.3,
     :Boiler => 0.75,
-    :HeatPump => 1.1,
-    :Geothermal => 0.5
+    :ThermalStorage => 0.1  # Very low operational costs for thermal storage
 )
+
 
 # Investment Costs (€/MW_th)
 c_investment_cost = Dict(
     :CHP => 1100000,
     :Boiler => 100000,
     :HeatPump => 591052,
-    :Geothermal => 1000000
+    :Geothermal => 1000000,
+    :ThermalStorage => 25000  # €/MWh storage capacity (tank storage is relatively inexpensive)
 )
 
 # Fixed O&M Costs (€/MW_th per year)
@@ -49,14 +57,16 @@ c_opex_fixed = Dict(
     :CHP => 15000,
     :Boiler => 2000,
     :HeatPump => 3000,
-    :Geothermal => 2000
+    :Geothermal => 2000,
+    :ThermalStorage => 500  # Low fixed O&M costs for thermal storage
 )
 
 c_energy_carrier = Dict(
     :CHP => :nat_gas,
     :Boiler => :nat_gas,
     :HeatPump => :elec,
-    :Geothermal => :geothermal
+    :Geothermal => :geothermal,
+    :ThermalStorage => :none  # Thermal storage doesn't consume primary energy
 )
 
 # Maximum Additional Capacity (MW_th)
@@ -64,7 +74,8 @@ c_max_additional_capacity = Dict(
     :CHP => 500,
     :Boiler => 500,
     :HeatPump => 250,
-    :Geothermal => 100
+    :Geothermal => 100,
+    :ThermalStorage => 1000  # MWh storage capacity
 )
 
 # Initial Capacities (MW_th)
@@ -72,7 +83,8 @@ c_initial_capacity = Dict(
     :CHP => 500,
     :Boiler => 350,
     :HeatPump => 0,
-    :Geothermal => 0
+    :Geothermal => 0,
+    :ThermalStorage => 0  # No initial thermal storage capacity
 )
 
 # Efficiencies (as a fraction)
@@ -81,7 +93,8 @@ c_efficiency_th = Dict(
     :CHP => 0.44,
     :Boiler => 0.9,
     :HeatPump => 3.0,
-    :Geothermal => 1.0
+    :Geothermal => 1.0,
+    :ThermalStorage => 0.95  # 95% round-trip efficiency for thermal storage
 )
 
 # Electrical efficiency
@@ -89,8 +102,14 @@ c_efficiency_el = Dict(
     :CHP => 0.43,
     :Boiler => 0.0,
     :HeatPump => 0.0,
-    :Geothermal => 0.0
+    :Geothermal => 0.0,
+    :ThermalStorage => 0.0  # No electricity generation from thermal storage
 )
+
+# Thermal storage specific parameters
+c_storage_loss_rate = 0.02  # Daily heat loss rate (2% per day for well-insulated tanks)
+c_max_charge_rate = 0.5     # Maximum charge rate as fraction of storage capacity (0.5 means full charge in 2 hours)
+c_max_discharge_rate = 0.5  # Maximum discharge rate as fraction of storage capacity
 
 salvage_fraction = 1
 
@@ -158,6 +177,7 @@ base_annual_demand = 2e6 # MWh
 # For each typical hour, the demand is the base annual demand scaled by the normalized value.
 c_base_demand_profile = [base_annual_demand * typical_hours[i][:value] for i in 1:n_typical_hours]
 c_base_demand_profile = round.(c_base_demand_profile)
+maximum(c_base_demand_profile)
 #sum(c_base_demand_profile[i] * typical_hours[i][:qty] for i in 1:n_typical_hours)
 
 maximum(c_base_demand_profile)
@@ -277,8 +297,12 @@ model = SDDP.MarkovianPolicyGraph(
     @variables(sp, begin
         # Investment Decision Variables for each technology
         0 <= u_expansion_tech[tech in technologies] <= c_max_additional_capacity[tech]
-        # Production Variables for each technology
+        # Production Variables for each technology (charging for storage, production for others)
         u_production_tech[tech in technologies, 1:n_typical_hours] >= 0
+        # Discharge from thermal storage
+        u_storage_discharge[1:n_typical_hours] >= 0
+        # Storage level at each hour
+        u_storage_level[1:n_typical_hours] >= 0
         # Unmet demand per hour
         u_unmet[1:n_typical_hours] >= 0
 
@@ -286,67 +310,49 @@ model = SDDP.MarkovianPolicyGraph(
         # It is 1.0 in the first year, so the first-year demand profile is simply c_base_demand_profile.
         # In subsequent years, it is multiplied by the demand multiplier of the respective Markovian state.
         0 <= x_demand_mult, SDDP.State, (initial_value = 1.0)
-
-        # Define a dictionary of states that track expansions built at each 
-        # investment stage for t=1,3,5 (since T=3 => 3 investment stages).
-        # cap_invest_s0 represents the initial capacities
-        0 <= cap_invest_s0[tech in technologies] <= 3000, SDDP.State, (initial_value = c_initial_capacity[tech])
-        # 0 <= x_capacity_tech[tech in technologies] <= 1000, SDDP.State, (initial_value = c_initial_capacity[tech])
-        0 <= cap_invest_s1[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
-        0 <= cap_invest_s3[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
-        0 <= cap_invest_s5[tech in technologies] <= c_max_additional_capacity[tech], SDDP.State, (initial_value = 0)
+        
+        # State variable: thermal storage level at the end of each stage (for inter-temporal coupling)
+        0 <= x_storage_level, SDDP.State, (initial_value = 0.0)
     end)
 
-    ### inital capacities stays the same regardless of the stage
+    # Create vintage capacity variables dynamically using container
+    cap_vintage = Dict()
+    for stage in investment_stages
+        if stage == 0
+            # Initial capacities
+            cap_vintage[stage] = @variable(sp, [tech in technologies], SDDP.State, (initial_value = c_initial_capacity[tech]), lower_bound = 0, upper_bound = 3000, base_name = "cap_vintage_$(stage)")
+        else
+            # New investment capacities  
+            cap_vintage[stage] = @variable(sp, [tech in technologies], SDDP.State, (initial_value = 0), lower_bound = 0, upper_bound = c_max_additional_capacity[tech], base_name = "cap_vintage_$(stage)")
+        end
+    end
+
+    # Initial capacities stay the same regardless of the stage
     @constraint(sp, [tech in technologies],
-        cap_invest_s0[tech].out == cap_invest_s0[tech].in
+        cap_vintage[0][tech].out == cap_vintage[0][tech].in
     )
 
     ################### Investment stage (odd-numbered stages) ###################
     if t % 2 == 1
         # No change in the demand multiplier in investment stages.
         @constraint(sp, x_demand_mult.out == x_demand_mult.in)
-        # Decide expansions in this stage => add to the relevant "cap_invest_sX"
-        if t == 1
-            @constraint(sp, [tech in technologies],
-                cap_invest_s1[tech].out == cap_invest_s1[tech].in + u_expansion_tech[tech]
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s3[tech].out == cap_invest_s3[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s5[tech].out == cap_invest_s5[tech].in
-            )
-        elseif t == 3
-            @constraint(sp, [tech in technologies],
-                cap_invest_s1[tech].out == cap_invest_s1[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s3[tech].out == cap_invest_s3[tech].in + u_expansion_tech[tech]
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s5[tech].out == cap_invest_s5[tech].in
-            )
-        elseif t == 5
-            @constraint(sp, [tech in technologies],
-                cap_invest_s1[tech].out == cap_invest_s1[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s3[tech].out == cap_invest_s3[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s5[tech].out == cap_invest_s5[tech].in + u_expansion_tech[tech]
-            )
-        elseif t == 7
-            @constraint(sp, [tech in technologies],
-                cap_invest_s1[tech].out == cap_invest_s1[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s3[tech].out == cap_invest_s3[tech].in
-            )
-            @constraint(sp, [tech in technologies],
-                cap_invest_s5[tech].out == cap_invest_s5[tech].in
-            )
+        
+        # No change in storage level during investment stages
+        @constraint(sp, x_storage_level.out == x_storage_level.in)
+        
+        # Dynamic investment logic: update vintages based on current stage
+        for stage in investment_stages[2:end]  # Skip stage 0 (initial capacities)
+            if stage == t
+                # This is the current investment stage - add new expansions
+                @constraint(sp, [tech in technologies],
+                    cap_vintage[stage][tech].out == cap_vintage[stage][tech].in + u_expansion_tech[tech]
+                )
+            else
+                # Other investment stages - no change
+                @constraint(sp, [tech in technologies],
+                    cap_vintage[stage][tech].out == cap_vintage[stage][tech].in
+                )
+            end
         end
 
         # Stage objective: expansion cost + fixed O&M costs
@@ -361,19 +367,11 @@ model = SDDP.MarkovianPolicyGraph(
         # Fixed O&M costs for the capacities that are still alive
         expr_opex_fix = 0.0
         for tech in technologies
-            # sum capacity from stages 1,3,5 that is alive
-            # in the "year" = ceil(t/2).
-            if is_alive(0, t, c_lifetime_initial, tech)
-                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s0[tech].in
-            end
-            if is_alive(1, t, c_lifetime_new, tech)
-                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s1[tech].in
-            end
-            if is_alive(3, t, c_lifetime_new, tech)
-                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s3[tech].in
-            end
-            if is_alive(5, t, c_lifetime_new, tech)
-                expr_opex_fix += c_opex_fixed[tech] * cap_invest_s5[tech].in
+            for stage in investment_stages
+                lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                if is_alive(stage, t, lifetime_dict, tech)
+                    expr_opex_fix += c_opex_fixed[tech] * cap_vintage[stage][tech].in
+                end
             end
         end
         # Multiply the O&M by 5 because each stage is 5 years
@@ -392,10 +390,11 @@ model = SDDP.MarkovianPolicyGraph(
         end
 
         ### Apply constraints for production and unmet demand based on the stochastic annual demand
-        # Total production from all technologies plus unmet demand meets the actual demand
+        # Total production from all technologies (except storage) plus storage discharge plus unmet demand meets the actual demand
         # The actual hourly demand is computed by scaling the first year's profile
         @constraint(sp, [hour in 1:n_typical_hours],
-            sum(u_production_tech[tech, hour] for tech in technologies) + u_unmet[hour] ==
+            sum(u_production_tech[tech, hour] for tech in technologies if tech != :ThermalStorage) + 
+            u_storage_discharge[hour] + u_unmet[hour] ==
             c_base_demand_profile[hour] * new_demand_mult
         )
 
@@ -404,17 +403,11 @@ model = SDDP.MarkovianPolicyGraph(
         capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
         for tech in technologies
             capacity_expr = 0.0
-            if is_alive(0, t, c_lifetime_initial, tech)
-                capacity_expr += cap_invest_s0[tech].in
-            end
-            if is_alive(1, t, c_lifetime_new, tech)
-                capacity_expr += cap_invest_s1[tech].in
-            end
-            if is_alive(3, t, c_lifetime_new, tech)
-                capacity_expr += cap_invest_s3[tech].in
-            end
-            if is_alive(5, t, c_lifetime_new, tech)
-                capacity_expr += cap_invest_s5[tech].in
+            for stage in investment_stages
+                lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                if is_alive(stage, t, lifetime_dict, tech)
+                    capacity_expr += cap_vintage[stage][tech].in
+                end
             end
             capacity_alive[tech] = capacity_expr
         end
@@ -426,44 +419,65 @@ model = SDDP.MarkovianPolicyGraph(
             u_production_tech[tech, hour] <= capacity_alive[tech]
         )
 
+        # Thermal storage constraints
+        storage_capacity = capacity_alive[:ThermalStorage]
+        
+        # Storage level constraints
+        @constraint(sp, [hour in 1:n_typical_hours],
+            u_storage_level[hour] <= storage_capacity
+        )
+        
+        # Charge/discharge rate constraints
+        @constraint(sp, [hour in 1:n_typical_hours],
+            u_production_tech[:ThermalStorage, hour] <= c_max_charge_rate * storage_capacity
+        )
+        @constraint(sp, [hour in 1:n_typical_hours],
+            u_storage_discharge[hour] <= c_max_discharge_rate * storage_capacity
+        )
+        
+        # Storage dynamics with heat losses
+        # For first hour: previous level comes from state variable
+        @constraint(sp, 
+            u_storage_level[1] == x_storage_level.in * (1 - c_storage_loss_rate/24) +
+            c_efficiency_th[:ThermalStorage] * u_production_tech[:ThermalStorage, 1] - 
+            u_storage_discharge[1]
+        )
+        
+        # For subsequent hours: level depends on previous hour within the stage
+        @constraint(sp, [hour in 2:n_typical_hours],
+            u_storage_level[hour] == u_storage_level[hour-1] * (1 - c_storage_loss_rate/24) +
+            c_efficiency_th[:ThermalStorage] * u_production_tech[:ThermalStorage, hour] - 
+            u_storage_discharge[hour]
+        )
+        
+        # Update storage state variable (average level over the last few hours)
+        @constraint(sp, 
+            x_storage_level.out == sum(u_storage_level[hour] for hour in max(1, n_typical_hours-23):n_typical_hours) / 
+                                   min(24, n_typical_hours)
+        )
+
         # State updates for investment states: no new expansions at operation stages
-        # Update capacity with the investments in the pipeline  for each technology
-        @constraint(sp, [tech in technologies],
-            cap_invest_s1[tech].out == cap_invest_s1[tech].in
-        )
-        @constraint(sp, [tech in technologies],
-            cap_invest_s3[tech].out == cap_invest_s3[tech].in
-        )
-        @constraint(sp, [tech in technologies],
-            cap_invest_s5[tech].out == cap_invest_s5[tech].in
-        )
+        for stage in investment_stages[2:end]  # Skip stage 0 (handled separately)
+            @constraint(sp, [tech in technologies],
+                cap_vintage[stage][tech].out == cap_vintage[stage][tech].in
+            )
+        end
 
         # Update the state variable for the cumulative demand multiplier.
         @constraint(sp, x_demand_mult.out == new_demand_mult)
 
-        # If this is the *final* stage (t=6 for T=3), include salvage for 
-        #  any capacity that extends beyond planning horizon.
+        # If this is the *final* stage, include salvage for any capacity that extends beyond planning horizon
         local salvage = 0.0
         if t == T * 2
             for tech in technologies
-                # if current year - investment year < lifetime
-                if (model_year - 0) < c_lifetime_initial[tech]
-                    # calculate remaning_life
-                    remaning_life = c_lifetime_initial[tech] - (model_year - 0)
-                    # calculate salvage value
-                    salvage += c_investment_cost[tech] * cap_invest_s0[tech].in * (remaning_life / c_lifetime_initial[tech])
-                end
-                if (model_year - 1) < c_lifetime_new[tech]
-                    remaning_life = c_lifetime_new[tech] - (model_year - 1)
-                    salvage += c_investment_cost[tech] * cap_invest_s1[tech].in * (remaning_life / c_lifetime_new[tech])
-                end
-                if (model_year - 2) < c_lifetime_new[tech]
-                    remaning_life = c_lifetime_new[tech] - (model_year - 2)
-                    salvage += c_investment_cost[tech] * cap_invest_s3[tech].in * (remaning_life / c_lifetime_new[tech])
-                end
-                if (model_year - 3) < c_lifetime_new[tech]
-                    remaning_life = c_lifetime_new[tech] - (model_year - 3)
-                    salvage += c_investment_cost[tech] * cap_invest_s5[tech].in * (remaning_life / c_lifetime_new[tech])
+                for stage in investment_stages
+                    stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
+                    lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                    
+                    if (model_year - stage_year) < lifetime_dict[tech]
+                        remaning_life = lifetime_dict[tech] - (model_year - stage_year)
+                        salvage += c_investment_cost[tech] * cap_vintage[stage][tech].in * (remaning_life / lifetime_dict[tech])
+                    end
                 end
             end
         end
@@ -479,15 +493,20 @@ model = SDDP.MarkovianPolicyGraph(
             local expr_annual_cost = sum(
                 (
                     sum(
-                        c_opex_var[tech] * u_production_tech[tech, hour] #O&M
-                        + (
-                            (c_energy_carrier[tech] == :nat_gas ? ω :
-                             (c_energy_carrier[tech] == :geothermal ? 0.0 : purch_elec_price[hour]))
-                            + (c_carbon_price[model_year] * c_emission_fac[c_energy_carrier[tech]]) # carbon price
-                            - (c_efficiency_el[tech] * sale_elec_price[hour]) # electricity revenue
-                        )
-                        * (u_production_tech[tech, hour] / c_efficiency_th[tech] # primary energy conversion
-                        )
+                        if tech == :ThermalStorage
+                            # For thermal storage, only O&M cost (no primary energy cost)
+                            c_opex_var[tech] * u_production_tech[tech, hour] + 
+                            c_opex_var[tech] * u_storage_discharge[hour]
+                        else
+                            # For other technologies, original cost structure
+                            c_opex_var[tech] * u_production_tech[tech, hour] + 
+                            (
+                                (c_energy_carrier[tech] == :nat_gas ? ω :
+                                 (c_energy_carrier[tech] == :geothermal ? 0.0 : purch_elec_price[hour]))
+                                + (c_carbon_price[model_year] * c_emission_fac[c_energy_carrier[tech]]) 
+                                - (c_efficiency_el[tech] * sale_elec_price[hour]) 
+                            ) * (u_production_tech[tech, hour] / c_efficiency_th[tech])
+                        end
                         for tech in technologies
                     )
                     + u_unmet[hour] * c_penalty
@@ -500,13 +519,18 @@ model = SDDP.MarkovianPolicyGraph(
 end
 
 # Train the model
-SDDP.train(model; iteration_limit=1000)
+SDDP.train(model; risk_measure=SDDP.CVaR(0.95), iteration_limit=1000)
 
 # Retrieve results
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
-# Simulation
-simulations = SDDP.simulate(model, 400, [:cap_invest_s0, :cap_invest_s1, :cap_invest_s3, :cap_invest_s5, :x_demand_mult, :u_production_tech, :u_expansion_tech, :u_unmet])
+# set seed for reproducibility
+Random.seed!(1234)
+
+# Simulation - dynamically create vintage symbols for simulation
+vintage_symbols = [Symbol("cap_vintage")]
+simulation_symbols = vcat(vintage_symbols, [:x_demand_mult, :x_storage_level, :u_production_tech, :u_expansion_tech, :u_unmet, :u_storage_discharge, :u_storage_level])
+simulations = SDDP.simulate(model, 400, simulation_symbols)
 
 # Print simulation results
 for t in 1:(T*2)
@@ -516,82 +540,53 @@ for t in 1:(T*2)
         for tech in technologies
             println("  Technology: $tech")
             println("    Expansion = ", value(sp[:u_expansion_tech][tech]))
-            println("    Capacity_s0_in = ", value(sp[:cap_invest_s0][tech].in))
-            println("    Capacity_s0_out = ", value(sp[:cap_invest_s0][tech].out))
-            println("    Capacity_s1_in = ", value(sp[:cap_invest_s1][tech].in))
-            println("    Capacity_s1_out = ", value(sp[:cap_invest_s1][tech].out))
-            println("    Capacity_s3_in = ", value(sp[:cap_invest_s3][tech].in))
-            println("    Capacity_s3_out = ", value(sp[:cap_invest_s3][tech].out))
-            println("    Capacity_s5_in = ", value(sp[:cap_invest_s5][tech].in))
-            println("    Capacity_s5_out = ", value(sp[:cap_invest_s5][tech].out))
+            for stage in investment_stages
+                println("    Capacity_s$(stage)_in = ", value(sp[:cap_vintage][stage, tech].in))
+                println("    Capacity_s$(stage)_out = ", value(sp[:cap_vintage][stage, tech].out))
+            end
         end
     else  # Operational stages
         println("Year $(div(t, 2)) - Operational Stage")
         println("Noise term: ", value(sp[:noise_term]))
         println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+        println("   Storage Level (in/out) = ", value(sp[:x_storage_level].in), " / ", value(sp[:x_storage_level].out))
         println("   Annual Demand = ", sum(c_base_demand_profile[i] * value(sp[:x_demand_mult].out) * typical_hours[i][:qty] for i in 1:n_typical_hours))
         for tech in technologies
-            # sum expansions from s=1,3,5 that are alive
+            # sum expansions from all investment stages that are alive
             local capacity_alive = 0.0
-            if is_alive(0, t, c_lifetime_initial, tech)
-                capacity_alive += value(sp[:cap_invest_s0][tech].in)
-            end
-            if is_alive(1, t, c_lifetime_new, tech)
-                capacity_alive += value(sp[:cap_invest_s1][tech].in)
-            end
-            if is_alive(3, t, c_lifetime_new, tech)
-                capacity_alive += value(sp[:cap_invest_s3][tech].in)
-            end
-            if is_alive(5, t, c_lifetime_new, tech)
-                capacity_alive += value(sp[:cap_invest_s5][tech].in)
+            for stage in investment_stages
+                lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                if is_alive(stage, t, lifetime_dict, tech)
+                    capacity_alive += value(sp[:cap_vintage][stage, tech].in)
+                end
             end
             println("    $tech alive Capacity = ", capacity_alive)
         end
-        total_production = sum(sum(value(sp[:u_production_tech][tech, hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours) for tech in technologies)
+        total_production = sum(sum(value(sp[:u_production_tech][tech, hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours) for tech in technologies if tech != :ThermalStorage)
+        total_storage_charge = sum(value(sp[:u_production_tech][:ThermalStorage, hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
+        total_storage_discharge = sum(value(sp[:u_storage_discharge][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
         total_unmet = sum(value(sp[:u_unmet][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
         println("  Total Production = ", total_production)
+        println("  Total Storage Charge = ", total_storage_charge)
+        println("  Total Storage Discharge = ", total_storage_discharge)
         println("  Total Unmet Demand = ", total_unmet)
         local salvage = 0.0
         if t == T * 2
             for tech in technologies
-                # if current year - investment year < lifetime
-                if (ceil(t / 2) - 0) < c_lifetime_initial[tech]
-                    println(" The investment year is 0")
-                    # calculate remaning_life
-                    remaning_life = c_lifetime_initial[tech] - (ceil(t / 2) - 0)
-                    println("   Remaining Life of $tech = ", remaning_life)
-                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s0][tech].in))
-                    # calculate salvage value
-                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s0][tech].in) * (remaning_life / c_lifetime_initial[tech])
-                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s0][tech].in) * (remaning_life / c_lifetime_initial[tech]))
-                    println("********************************")
-                end
-                if (ceil(t / 2) - 1) < c_lifetime_new[tech]
-                    println(" The investment year is 1")
-                    remaning_life = c_lifetime_new[tech] - (ceil(t / 2) - 1)
-                    println("   Remaining Life of $tech = ", remaning_life)
-                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s1][tech].in))
-                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s1][tech].in) * (remaning_life / c_lifetime_new[tech])
-                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s1][tech].in) * (remaning_life / c_lifetime_new[tech]))
-                    println("********************************")
-                end
-                if (ceil(t / 2) - 2) < c_lifetime_new[tech]
-                    println(" The investment year is 2")
-                    remaning_life = c_lifetime_new[tech] - (ceil(t / 2) - 2)
-                    println("   Remaining Life of $tech = ", remaning_life)
-                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s3][tech].in))
-                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s3][tech].in) * (remaning_life / c_lifetime_new[tech])
-                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s3][tech].in) * (remaning_life / c_lifetime_new[tech]))
-                    println("********************************")
-                end
-                if (ceil(t / 2) - 3) < c_lifetime_new[tech]
-                    println(" The investment year is 3")
-                    remaning_life = c_lifetime_new[tech] - (ceil(t / 2) - 3)
-                    println("   Remaining Life of $tech = ", remaning_life)
-                    println("   Remaining capacity of $tech = ", value(sp[:cap_invest_s5][tech].in))
-                    salvage += c_investment_cost[tech] * value(sp[:cap_invest_s5][tech].in) * (remaning_life / c_lifetime_new[tech])
-                    println("   Salvage Value of $tech = ", c_investment_cost[tech] * value(sp[:cap_invest_s5][tech].in) * (remaning_life / c_lifetime_new[tech]))
-                    println("********************************")
+                for stage in investment_stages
+                    stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
+                    lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                    
+                    if (ceil(t / 2) - stage_year) < lifetime_dict[tech]
+                        println(" The investment year is $stage_year")
+                        remaning_life = lifetime_dict[tech] - (ceil(t / 2) - stage_year)
+                        println("   Remaining Life of $tech = ", remaning_life)
+                        println("   Remaining capacity of $tech = ", value(sp[:cap_vintage][stage, tech].in))
+                        stage_salvage = c_investment_cost[tech] * value(sp[:cap_vintage][stage, tech].in) * (remaning_life / lifetime_dict[tech])
+                        salvage += stage_salvage
+                        println("   Salvage Value of $tech = ", stage_salvage)
+                        println("********************************")
+                    end
                 end
             end
         end
@@ -661,25 +656,24 @@ Plots.plot(
 ####################################################################################
 ##############################  Manual band plot ###################################
 ####################################################################################
-function plot_bands(data, title, xticks, xlabel, ylabel)
+function plot_bands(data, title, x_values, xticks, xlabel, ylabel, legend_pos)
     # Compute statistics for each column (apply quantile to each column)
-    x_values = xticks  # Column indices as x-axis
     q5 = [quantile(data[:, i], 0.05) for i in 1:size(data, 2)]
     q25 = [quantile(data[:, i], 0.25) for i in 1:size(data, 2)]
     q50 = [quantile(data[:, i], 0.50) for i in 1:size(data, 2)]  # Median (50th percentile)
     q75 = [quantile(data[:, i], 0.75) for i in 1:size(data, 2)]
     q95 = [quantile(data[:, i], 0.95) for i in 1:size(data, 2)]
     # Create plot
-    p = plot(x_values, q5, fillrange=q95, fillalpha=0.15, c=2, label="5-95", legend=:topleft, lw=0)
-    plot!(x_values, q25, fillrange=q75, fillalpha=0.35, c=2, label="25-75", legend=:topleft, lw=0)
-    plot!(x_values, q95, fillalpha=0.15, c=2, label="", legend=:topleft, lw=0)
-    plot!(x_values, q75, fillalpha=0.35, c=2, label="", legend=:topleft, lw=0)
-    plot!(x_values, q50, label="Median (50th Percentile)", lw=2, color=2)  # Median line
+    p = plot(x_values, q5, fillrange=q95, fillalpha=0.15, c=2, label="5-95 percentile", legend=:topleft, lw=0, xticks=xticks)
+    plot!(x_values, q25, fillrange=q75, fillalpha=0.35, c=2, label="25-75 percentile", legend=:topleft, lw=0, xticks=xticks)
+    plot!(x_values, q95, fillalpha=0.15, c=2, label="", legend=legend_pos, lw=0, xticks=xticks)
+    plot!(x_values, q75, fillalpha=0.35, c=2, label="", legend=legend_pos, lw=0, xticks=xticks)
+    plot!(x_values, q50, label="Median", lw=2, color=2)  # Median line
     # Labels and title
     xlabel!(xlabel)
     ylabel!(ylabel)
-    title!(title)
-    return(p)
+    # title!(title)
+    return (p)
     # display()
 end
 
@@ -688,22 +682,22 @@ for tech in technologies
     for sim in (1:length(simulations))
         for t in (1:T*2)
             cap_alive = 0
-            if is_alive(0, t, c_lifetime_initial, tech)
-                cap_alive += value(simulations[sim][t][:cap_invest_s0][tech].in)
-            end
-            if is_alive(1, t, c_lifetime_new, tech)
-                cap_alive += value(simulations[sim][t][:cap_invest_s1][tech].in)
-            end
-            if is_alive(3, t, c_lifetime_new, tech)
-                cap_alive += value(simulations[sim][t][:cap_invest_s3][tech].in)
-            end
-            if is_alive(5, t, c_lifetime_new, tech)
-                cap_alive += value(simulations[sim][t][:cap_invest_s5][tech].in)
+            for stage in investment_stages
+                lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+                if is_alive(stage, t, lifetime_dict, tech)
+                    cap_alive += value(simulations[sim][t][:cap_vintage][stage, tech].in)
+                end
             end
             total_cap_alive[sim, t] = cap_alive
         end
     end
-    fig = plot_bands(total_cap_alive, "$tech Alive Capacities", 1:8, "Stages", "Capacity [MW_th]")
+    if tech == :boiler
+        legend_pos = :topright
+    else
+        legend_pos = :topleft
+    end
+
+    fig = plot_bands(total_cap_alive, "$tech Alive Capacities", 1:4, "Stages", "Capacity [MW_th]", legend_pos)
     display(fig)
     savefig("AliveCapacities_$tech.png")
 end
@@ -720,29 +714,44 @@ for tech in technologies
             counter += 1
         end
     end
-    fig = plot_bands(u_invs, "$tech Investment", 1:4, "Investment Stages", "Investment [MW_th]")
+    if tech == :geothermal
+        legend_pos = :topleft
+    else
+        legend_pos = :topright
+    end
+    fig = plot_bands(u_invs, "$tech Investment", [1, 3, 5, 7], [1, 3, 5, 7], "Investment Stages", "Investment [MW_th]", legend_pos)
     display(fig)
     savefig("Investments_$tech.png")
 end
 ####################################################################################
 ##############################  Load Duration Curve ################################
 ####################################################################################
-n_sim = 2
+n_sim = 1
 
-plt = plot(title="Simulation $n_sim - Operation Stage Load Duration Curve", xlabel="Hours", ylabel="Production [MW_th]", legend=:topleft)
+plt = plot(xlabel="Hours", ylabel="Heat Generation [MWh_th]", legend=:topleft)
 y0 = zeros(8760 * T, length(technologies))
 labels = Vector{String}()
 
-sorted_keys = sort(collect(c_opex_var), by=x -> x[2], rev=true)  # Sort by value descending
-enumerated_keys = [pair[1] for pair in sorted_keys]  # Extract sorted keys
+# sorted_keys = sort(collect(c_opex_var), by=x -> x[2], rev=true)  # Sort by value descending
+enumerated_keys = [pair[1] for pair in collect(c_opex_var)]  # Extract sorted keys
+new_vect = [:Geothermal, :HeatPump, :CHP, :Boiler, :ThermalStorage]
 println(enumerated_keys)
-for (index, tech) in enumerate(enumerated_keys)
+for (index, tech) in enumerate(new_vect)
     for t_prim in 1:(T)
         t = 2 * t_prim
         sp = simulations[n_sim][t]
         total_unmet = sum(value(sp[:u_unmet][hour] * typical_hours[hour][:qty]) for hour in 1:n_typical_hours)
-        y0[1+8760*(t_prim-1):8760*t_prim, index] = sort(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]])
-        prod_tot = (sum(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]]))
+        
+        if tech == :ThermalStorage
+            # For thermal storage, plot discharge instead of production
+            y0[1+8760*(t_prim-1):8760*t_prim, index] = sort(Array(values(sp[:u_storage_discharge][:]))[second_component[:]])
+            prod_tot = (sum(Array(values(sp[:u_storage_discharge][:]))[second_component[:]]))
+        else
+            # For other technologies, use production
+            y0[1+8760*(t_prim-1):8760*t_prim, index] = sort(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]])
+            prod_tot = (sum(Array(values(sp[:u_production_tech][tech, :]))[second_component[:]]))
+        end
+        
         # vline(1+8760*(t_prim-1))
         print(" $(tech) $(prod_tot)")
         println()
@@ -793,7 +802,7 @@ function plot_violins(data, title, xlabels, y_legend)
 
 end
 
-function plot_combined_violins(data1, data2, title, xlabels, y_legend)
+function plot_combined_violins(data1, data2, title, xlabels, y_legend, leg_pos)
     # Prepare data for violin plot
     group_labels = repeat(xlabels, inner=size(data1, 1))  # Repeat each x-axis label for each data point
     flattened_values_1 = vec(data1)  # Flatten the matrix into a single vector
@@ -801,16 +810,16 @@ function plot_combined_violins(data1, data2, title, xlabels, y_legend)
 
     # Overlay means points for each group
     group_means = [mean(data2[:, i]) for i in 1:size(data1, 2)]
-    scatter(group_labels, flattened_values_2, color=:red, markershape=:o, label="mean cons", markersize=2, lw=0)
+    scatter(group_labels, flattened_values_2, color=:red, markershape=:o, label="Mean annual demand", markersize=2, lw=0)
     # Create violin plot
     violin!(group_labels, flattened_values_1,
-        xlabel="Periods", title=title, label="pdf prod",
-        legend=true, alpha=0.5, c=:green, side=:right)
+        xlabel="Periods", title=title, label="PDF of annual production",
+        legend=leg_pos, alpha=0.5, c=:green, side=:right)
     # dotplot!(group_labels, flattened_values_1, side=:right, color=:green, markershape=:o, label="samples", markersize = 2)
     # Create violin plot
     violin!(group_labels, flattened_values_2,
-        xlabel="Periods", title=title, label="pdf conso",
-        legend=true, alpha=0.5, c=:red, side=:left)
+        xlabel="Periods", title=title, label="PDF of annnual demand",
+        legend=leg_pos, alpha=0.5, c=:red, side=:left)
     plot!(gridlinewidth=2)
     # scatter!(xlabels, group_means, color=:red, markershape=:o, label="Mean")
 
@@ -821,7 +830,7 @@ end
 xlabels = []
 ope_var_cons = zeros(length(simulations), T)
 for (ope_stage, stage) in enumerate(2:2:2*T)
-    push!(xlabels, "$(2020 + ope_stage*T_years) \n-> $(2020 + (ope_stage+1)*T_years )")
+    push!(xlabels, "$(2010 + ope_stage*T_years)")
     for sim in 1:length(simulations)
         ope_var_cons[sim, ope_stage] = values(simulations[sim][stage][:x_demand_mult].out) * base_annual_demand
     end
@@ -831,12 +840,12 @@ end
 ope_var = zeros(length(simulations), T)
 # Boiler
 for (ope_stage, stage) in enumerate(2:2:2*T)
-    push!(xlabels, "$(2020 + ope_stage*T_years) \n-> $(2020 + (ope_stage+1)*T_years )")
+    push!(xlabels, "$(2010 + ope_stage*T_years)")
     for sim in 1:length(simulations)
         ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:Boiler, :]))[second_component[:]]))
     end
 end
-q1 = plot_combined_violins(ope_var, ope_var_cons, "Yearly boiler prod", xlabels, "Production in MWh")
+q1 = plot_combined_violins(ope_var, ope_var_cons, "Boiler", xlabels, "Production in MWh", :inside)
 plot!(ylim=(0, upper_bound))
 
 # CHP
@@ -845,7 +854,7 @@ for (ope_stage, stage) in enumerate(2:2:2*T)
         ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:CHP, :]))[second_component[:]]))
     end
 end
-q2 = plot_combined_violins(ope_var, ope_var_cons, "Yearly CHP prod", xlabels, "Production in MWh")
+q2 = plot_combined_violins(ope_var, ope_var_cons, "CHP", xlabels, "Production in MWh", :inside)
 plot!(ylim=(0, upper_bound))
 
 # HeatPump
@@ -854,7 +863,7 @@ for (ope_stage, stage) in enumerate(2:2:2*T)
         ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:HeatPump, :]))[second_component[:]]))
     end
 end
-q3 = plot_combined_violins(ope_var, ope_var_cons, "Yearly Heat Pump production", xlabels, "Production in MWh")
+q3 = plot_combined_violins(ope_var, ope_var_cons, "Heat Pump", xlabels, "Production in MWh", :inside)
 
 # Geothermal
 for (ope_stage, stage) in enumerate(2:2:2*T)
@@ -862,11 +871,11 @@ for (ope_stage, stage) in enumerate(2:2:2*T)
         ope_var[sim, ope_stage] = (sum(Array(values(simulations[sim][stage][:u_production_tech][:Geothermal, :]))[second_component[:]]))
     end
 end
-q4 = plot_combined_violins(ope_var, ope_var_cons, "Yearly Geothermal production", xlabels, "Production in MWh")
+q4 = plot_combined_violins(ope_var, ope_var_cons, "Geothermal", xlabels, "Production in MWh", :bottom)
 
 
 plot!(ylim=(0, upper_bound))
 plot!(size=(1500, 500))
 l = @layout [a b c d]
-q = plot(q1, q2, q3, q4, layout=l)
+q = plot(q1, q2, q3, q4, link=:y, layout=l)
 savefig("ViolinPlots_ProductionVsDemand.png")

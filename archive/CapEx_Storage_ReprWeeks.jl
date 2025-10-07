@@ -560,7 +560,7 @@ end
 ##############################################################################
 
 println("Training SDDP model...")
-SDDP.train(model; risk_measure=SDDP.CVaR(0.95), iteration_limit=400, log_frequency=100)
+SDDP.train(model; risk_measure=SDDP.CVaR(0.95), iteration_limit=100, log_frequency=100)
 
 println("Optimal Cost: ", SDDP.calculate_bound(model))
 
@@ -569,10 +569,197 @@ Random.seed!(1234)
 
 println("Running simulations...")
 simulation_symbols = [:x_demand_mult, :u_production, :u_expansion_tech, :u_expansion_storage, 
-                     :u_charge, :u_discharge, :u_level, :u_unmet]
+                     :u_charge, :u_discharge, :u_level, :u_unmet, ]
 simulations = SDDP.simulate(model, 400, simulation_symbols)
 
-println("Simulations complete. Generating visualizations...")
+println("Simulations complete. Printing detailed results...")
+
+##############################################################################
+# Print Simulation Results with File Output for Validation
+##############################################################################
+
+# Open output file for writing simulation results
+output_file = open("simulation_results_storage_reprweeks.txt", "w")
+
+println("=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
+println(output_file, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
+
+for t in 1:(T*2)
+    sp = simulations[3][t]  # Use 3rd simulation for detailed output
+
+    if t % 2 == 1  # Investment stages (odd stages)
+        println("Year $(div(t + 1, 2)) - Investment Stage")
+        println(output_file, "Year $(div(t + 1, 2)) - Investment Stage")
+
+        for tech in technologies
+            println("  Technology: $tech")
+            println("    Expansion = ", value(sp[:u_expansion_tech][tech]))
+            println(output_file, "  Technology: $tech")
+            println(output_file, "    Expansion = ", value(sp[:u_expansion_tech][tech]))
+
+            # Note: In Storage_ReprWeeks, we don't have direct access to vintage capacity state variables
+            # This would require modification of the simulation symbols to include vintage capacity tracking
+            for stage in investment_stages
+                println("    Capacity_s$(stage)_in = [Not available - requires vintage state tracking]")
+                println("    Capacity_s$(stage)_out = [Not available - requires vintage state tracking]")
+                println(output_file, "    Capacity_s$(stage)_in = [Not available - requires vintage state tracking]")
+                println(output_file, "    Capacity_s$(stage)_out = [Not available - requires vintage state tracking]")
+            end
+        end
+
+        # Print storage expansion information
+        println("  Storage:")
+        println("    Expansion = ", value(sp[:u_expansion_storage]))
+        println(output_file, "  Storage:")
+        println(output_file, "    Expansion = ", value(sp[:u_expansion_storage]))
+
+        for stage in investment_stages
+            println("    Storage_Capacity_s$(stage)_in = [Not available - requires vintage state tracking]")
+            println("    Storage_Capacity_s$(stage)_out = [Not available - requires vintage state tracking]")
+            println(output_file, "    Storage_Capacity_s$(stage)_in = [Not available - requires vintage state tracking]")
+            println(output_file, "    Storage_Capacity_s$(stage)_out = [Not available - requires vintage state tracking]")
+        end
+
+    else  # Operational stages
+        println("Year $(div(t, 2)) - Operational Stage")
+        println(output_file, "Year $(div(t, 2)) - Operational Stage")
+
+        # Energy price noise term
+        try
+            println("Noise term: ", value(sp[:noise_term]))
+            println(output_file, "Noise term: ", value(sp[:noise_term]))
+        catch
+            println("Noise term: Not available")
+            println(output_file, "Noise term: Not available")
+        end
+
+        # Demand information
+        println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+        println(output_file, "   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+
+        # Calculate total annual demand across all representative weeks
+        annual_demand = 0.0
+        for week in 1:n_weeks
+            week_demand = sum(scaled_weeks[week]) * value(sp[:x_demand_mult].out)
+            annual_demand += week_demand * week_weights_normalized[week]
+        end
+
+        println("   Annual Demand = ", annual_demand)
+        println(output_file, "   Annual Demand = ", annual_demand)
+
+        # Technology capacity information (simplified without vintage details)
+        for tech in technologies
+            # Calculate alive capacity (would need proper vintage tracking for accuracy)
+            capacity_alive = "Not available - requires vintage capacity tracking"
+            println("    $tech alive Capacity = ", capacity_alive)
+            println(output_file, "    $tech alive Capacity = ", capacity_alive)
+        end
+
+        # Print storage information
+        storage_capacity_alive = "Not available - requires vintage capacity tracking"
+        println("    Storage alive Capacity = ", storage_capacity_alive)
+        println(output_file, "    Storage alive Capacity = ", storage_capacity_alive)
+
+        # Calculate storage charge and discharge totals across all representative weeks
+        total_storage_charge = 0.0
+        total_storage_discharge = 0.0
+        for week in 1:n_weeks
+            week_charge = sum(value(sp[:u_charge][week, hour]) for hour in 1:hours_per_week)
+            week_discharge = sum(value(sp[:u_discharge][week, hour]) for hour in 1:hours_per_week)
+            total_storage_charge += week_charge * week_weights_normalized[week]
+            total_storage_discharge += week_discharge * week_weights_normalized[week]
+        end
+
+        println("    Storage charge total = ", total_storage_charge)
+        println("    Storage discharge total = ", total_storage_discharge)
+        println(output_file, "    Storage charge total = ", total_storage_charge)
+        println(output_file, "    Storage discharge total = ", total_storage_discharge)
+
+        # Storage level at end (use last hour of last week as proxy)
+        println("    Storage level at end = ", value(sp[:u_level][n_weeks, hours_per_week]))
+        println(output_file, "    Storage level at end = ", value(sp[:u_level][n_weeks, hours_per_week]))
+
+        # Calculate total production and unmet demand
+        total_production = 0.0
+        total_unmet = 0.0
+        for week in 1:n_weeks
+            week_production = sum(sum(value(sp[:u_production][tech, week, hour]) for hour in 1:hours_per_week) for tech in technologies)
+            week_unmet = sum(value(sp[:u_unmet][week, hour]) for hour in 1:hours_per_week)
+            total_production += week_production * week_weights_normalized[week]
+            total_unmet += week_unmet * week_weights_normalized[week]
+        end
+
+        println("  Total Production = ", total_production)
+        println("  Total Unmet Demand = ", total_unmet)
+        println(output_file, "  Total Production = ", total_production)
+        println(output_file, "  Total Unmet Demand = ", total_unmet)
+
+        # Salvage value calculation (final stage only) - simplified structure
+        local salvage = 0.0
+        if t == T * 2
+            model_year = Int(ceil(t / 2))
+
+            # Technology salvage values
+            for tech in technologies
+                for stage in investment_stages
+                    stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
+                    lifetime_dict = (stage == 0) ? c_lifetime_initial : c_lifetime_new
+
+                    if (model_year - stage_year) < lifetime_dict[tech]
+                        println(" The investment year is $stage_year")
+                        println(output_file, " The investment year is $stage_year")
+                        remaining_life = lifetime_dict[tech] - (model_year - stage_year)
+                        println("   Remaining Life of $tech = ", remaining_life)
+                        println("   Remaining capacity of $tech = [Not available - requires vintage capacity tracking]")
+                        println(output_file, "   Remaining Life of $tech = ", remaining_life)
+                        println(output_file, "   Remaining capacity of $tech = [Not available - requires vintage capacity tracking]")
+
+                        # Salvage calculation would require actual capacity values
+                        stage_salvage = 0.0  # Placeholder
+                        salvage += stage_salvage
+                        println("   Salvage Value of $tech = ", stage_salvage)
+                        println("********************************")
+                        println(output_file, "   Salvage Value of $tech = ", stage_salvage)
+                        println(output_file, "********************************")
+                    end
+                end
+            end
+
+            # Storage salvage value calculation
+            for stage in investment_stages
+                stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
+                if (model_year - stage_year) < storage_params[:lifetime]
+                    println(" Storage investment year is $stage_year")
+                    println(output_file, " Storage investment year is $stage_year")
+                    remaining_life = storage_params[:lifetime] - (model_year - stage_year)
+                    println("   Remaining Life of Storage = ", remaining_life)
+                    println("   Remaining capacity of Storage = [Not available - requires vintage capacity tracking]")
+                    println(output_file, "   Remaining Life of Storage = ", remaining_life)
+                    println(output_file, "   Remaining capacity of Storage = [Not available - requires vintage capacity tracking]")
+
+                    storage_salvage = 0.0  # Placeholder
+                    salvage += storage_salvage
+                    println("   Salvage Value of Storage = ", storage_salvage)
+                    println("********************************")
+                    println(output_file, "   Salvage Value of Storage = ", storage_salvage)
+                    println(output_file, "********************************")
+                end
+            end
+        end
+
+        println("  Total Salvage Value = ", salvage * salvage_fraction)
+        println(output_file, "  Total Salvage Value = ", salvage * salvage_fraction)
+    end
+end
+
+println("=== END SIMULATION RESULTS ===")
+println(output_file, "=== END SIMULATION RESULTS ===")
+
+# Close the output file
+close(output_file)
+
+println("\nDetailed simulation results have been written to 'simulation_results_storage_reprweeks.txt' for validation.")
+println("Generating visualizations...")
 
 ##############################################################################
 # Visualization Functions
