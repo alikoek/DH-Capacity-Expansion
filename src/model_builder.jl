@@ -52,8 +52,7 @@ function build_price_distribution(params::ModelParameters)
 
     price_quantiles = range(0.05, 0.95; length=params.num_price_scenarios)
     price_values = quantile.(price_distribution, price_quantiles)
-    price_probabilities = pdf(price_distribution, price_values)
-    price_probabilities_normalized = price_probabilities / sum(price_probabilities)
+    price_probabilities_normalized = fill(1.0 / params.num_price_scenarios, params.num_price_scenarios)
 
     return price_values, price_probabilities_normalized
 end
