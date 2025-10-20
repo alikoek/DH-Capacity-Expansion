@@ -258,14 +258,14 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                         # First hour: start empty
                         @constraint(sp,
                             u_level[week, hour] ==
-                            params.storage_params[:efficiency] * u_charge[week, hour] - u_discharge[week, hour]
+                            params.storage_params[:efficiency] * u_charge[week, hour] - u_discharge[week, hour] / params.storage_params[:efficiency]
                         )
                     else
                         # Subsequent hours: include previous level and losses
                         @constraint(sp,
                             u_level[week, hour] ==
                             u_level[week, hour-1] * (1 - params.storage_params[:loss_rate]/24) +
-                            params.storage_params[:efficiency] * u_charge[week, hour] - u_discharge[week, hour]
+                            params.storage_params[:efficiency] * u_charge[week, hour] - u_discharge[week, hour] / params.storage_params[:efficiency]
                         )
                     end
                 end
