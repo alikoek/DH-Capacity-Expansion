@@ -1,0 +1,12 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "conda-activate-DHN_expansion",
+        "type": "shell",
+        "command": "bash -lc 'source $(conda info --base)/etc/profile.d/conda.sh && conda activate DHN_expansion'",
+        "problemMatcher": []
+      }
+    ]
+  }
+  

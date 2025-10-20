@@ -1,0 +1,21 @@
+
+
+  {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "julia",
+        "request": "launch",
+        "name": "Julia: Launch current file (with conda env)",
+        "program": "${file}",
+        "cwd": "${workspaceFolder}",
+        "stopOnEntry": false,
+        "preLaunchTask": "conda-activate-DHN_expansion",
+        "env":{
+            "CONDA_PREFIX": "/Users/jonathanhachez/opt/anaconda3/envs/DHN_expansion",
+            "PATH": "/Users/jonathanhachez/opt/anaconda3/envs/DHN_expansion/bin:${env:PATH}"
+          }
+      }
+    ]
+  }
+  

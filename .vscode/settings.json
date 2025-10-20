@@ -1,0 +1,22 @@
+{
+    // Path to Julia executable
+    "julia.executablePath": "/Users/jonathanhachez/.julia/juliaup/julia-1.10.10+0.aarch64.apple.darwin14/bin/julia",
+
+    // Disable telemetry
+    "julia.enableTelemetry": false,
+
+    // Always start REPL automatically when running code
+    "julia.startREPL": true,
+
+    // Enable code cells (## or # %% delimiters)
+    "julia.cellDelimiter": "#%%",
+
+    // Show inline results below the code
+    "julia.execution.resultType": "inline",
+
+    // Show “Run Cell” / “Run Above” buttons
+    "julia.showCodeCells": true,
+
+    // Optional: improve startup speed
+    "julia.symbolCacheDownload": true
+}
