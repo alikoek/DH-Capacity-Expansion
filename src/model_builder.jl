@@ -22,13 +22,15 @@ function build_transition_matrices(T::Int)
     transition_matrices = Array{Float64,2}[
         [1.0]',
         [1.0]',
-        [0.3 0.5 0.2],
-        I,
-        [0.3 0.5 0.2; 0.3 0.5 0.2; 0.3 0.5 0.2],
-        I,
-        [0.3 0.5 0.2; 0.3 0.5 0.2; 0.3 0.5 0.2],
-        I,
     ]
+    # Alternate [0.3 0.5 0.2; ...] and I blocks for 2T entries
+    for i in 1:2T
+        if isodd(i)
+            push!(transition_matrices, [0.3 0.5 0.2; 0.3 0.5 0.2; 0.3 0.5 0.2])
+        else
+            push!(transition_matrices, I)
+        end
+    end
     return transition_matrices
 end
 
