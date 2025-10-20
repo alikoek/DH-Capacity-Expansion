@@ -240,40 +240,40 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
     plt = SDDP.SpaghettiPlot(simulations)
 
     for tech in params.technologies
-        SDDP.add_spaghetti(plt; title="Expansion_$tech") do data
-            return data[:u_expansion_tech][tech]
+        SDDP.add_spaghetti(plt; title="Expansion_$tech") do sp
+            return sp[:u_expansion_tech][tech]
         end
 
-        SDDP.add_spaghetti(plt; title="Production_$tech") do data
+        SDDP.add_spaghetti(plt; title="Production_$tech") do sp
             # Sum across all weeks and hours
             total = 0.0
             for week in 1:data.n_weeks
-                total += sum(data[:u_production][tech, week, :]) * data.week_weights_normalized[week]
+                total += sum(sp[:u_production][tech, week, :]) * data.week_weights_normalized[week]
             end
             return total
         end
     end
 
-    SDDP.add_spaghetti(plt; title="Storage_Expansion") do data
-        return data[:u_expansion_storage]
+    SDDP.add_spaghetti(plt; title="Storage_Expansion") do sp
+        return sp[:u_expansion_storage]
     end
 
-    SDDP.add_spaghetti(plt; title="Storage_Discharge") do data
+    SDDP.add_spaghetti(plt; title="Storage_Discharge") do sp
         total = 0.0
         for week in 1:data.n_weeks
-            total += sum(data[:u_discharge][week, :]) * data.week_weights_normalized[week]
+            total += sum(sp[:u_discharge][week, :]) * data.week_weights_normalized[week]
         end
         return total
     end
 
-    SDDP.add_spaghetti(plt; title="Demand_Multiplier") do data
-        return data[:x_demand_mult].out
+    SDDP.add_spaghetti(plt; title="Demand_Multiplier") do sp
+        return sp[:x_demand_mult].out
     end
 
-    SDDP.add_spaghetti(plt; title="Unmet_Demand") do data
+    SDDP.add_spaghetti(plt; title="Unmet_Demand") do sp
         total = 0.0
         for week in 1:data.n_weeks
-            total += sum(data[:u_unmet][week, :]) * data.week_weights_normalized[week]
+            total += sum(sp[:u_unmet][week, :]) * data.week_weights_normalized[week]
         end
         return total
     end
