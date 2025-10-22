@@ -26,10 +26,18 @@ Train the SDDP model and run simulations.
 - Simulation results
 """
 function run_simulation(model, params::ModelParameters, data::ProcessedData;
-    risk_measure=SDDP.CVaR(0.95), iteration_limit=100,
+    risk_measure=SDDP.CVaR(0.95), iteration_limit=1000,
     n_simulations=400, random_seed=1234)
     println("Training SDDP model...")
-    SDDP.train(model; risk_measure=risk_measure, iteration_limit=iteration_limit, log_frequency=100, parallel_scheme=SDDP.Threaded())
+
+    # Train with automatic convergence detection
+    SDDP.train(
+        model;
+        risk_measure=risk_measure,
+        iteration_limit=iteration_limit,
+        log_frequency=50,
+        parallel_scheme=SDDP.Threaded(),
+    )
 
     println("Optimal Cost: ", SDDP.calculate_bound(model))
 
