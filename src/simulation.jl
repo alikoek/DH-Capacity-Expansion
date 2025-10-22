@@ -29,7 +29,7 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     risk_measure=SDDP.CVaR(0.95), iteration_limit=100,
     n_simulations=400, random_seed=1234)
     println("Training SDDP model...")
-    SDDP.train(model; risk_measure=risk_measure, iteration_limit=iteration_limit, log_frequency=100)
+    SDDP.train(model; risk_measure=risk_measure, iteration_limit=iteration_limit, log_frequency=100, parallel_scheme=SDDP.Threaded())
 
     println("Optimal Cost: ", SDDP.calculate_bound(model))
 
@@ -86,7 +86,7 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
         end
     end
 
-    simulations = SDDP.simulate(model, n_simulations, simulation_symbols; custom_recorders=custom_recorders)
+    simulations = SDDP.simulate(model, n_simulations, simulation_symbols; parallel_scheme=SDDP.Threaded(), custom_recorders=custom_recorders)
 
     println("Simulations complete.")
 
@@ -236,7 +236,7 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             println(io, "    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
 
             # Calculate production by technology and unmet demand
-            production_by_tech = Dict{Symbol, Float64}()
+            production_by_tech = Dict{Symbol,Float64}()
             for tech in params.technologies
                 tech_production = 0.0
                 for week in 1:data.n_weeks
