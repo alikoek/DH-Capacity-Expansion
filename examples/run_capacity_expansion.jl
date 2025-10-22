@@ -22,8 +22,8 @@ output_dir = joinpath(project_dir, "output")
 excel_file = joinpath(data_dir, "model_parameters.xlsx")
 
 # Simulation settings
-ITERATION_LIMIT = 1        # Number of SDDP training iterations
-N_SIMULATIONS = 1          # Number of Monte Carlo simulations
+ITERATION_LIMIT = 50        # Number of SDDP training iterations
+N_SIMULATIONS = 100          # Number of Monte Carlo simulations
 RANDOM_SEED = 1234          # Random seed for reproducibility
 RISK_MEASURE = :CVaR        # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95           # CVaR confidence level (if using CVaR)
