@@ -82,13 +82,13 @@ function load_parameters(excel_path::String)
     tech_df = DataFrame(XLSX.gettable(tech_sheet))
 
     technologies = Symbol.(tech_df.technology)
-    c_initial_capacity = Dict(zip(technologies, Float64.(tech_df.initial_capacity)))
-    c_max_additional_capacity = Dict(zip(technologies, Float64.(tech_df.max_additional_capacity)))
-    c_investment_cost = Dict(zip(technologies, Float64.(tech_df.investment_cost)))
-    c_opex_fixed = Dict(zip(technologies, Float64.(tech_df.fixed_om)))
-    c_opex_var = Dict(zip(technologies, Float64.(tech_df.variable_om)))
-    c_efficiency_th = Dict(zip(technologies, Float64.(tech_df.efficiency_th)))
-    c_efficiency_el = Dict(zip(technologies, Float64.(tech_df.efficiency_el)))
+    c_initial_capacity = Dict(zip(technologies, round.(Float64.(tech_df.initial_capacity), digits=2)))
+    c_max_additional_capacity = Dict(zip(technologies, round.(Float64.(tech_df.max_additional_capacity), digits=2)))
+    c_investment_cost = Dict(zip(technologies, round.(Float64.(tech_df.investment_cost), digits=2)))
+    c_opex_fixed = Dict(zip(technologies, round.(Float64.(tech_df.fixed_om), digits=2)))
+    c_opex_var = Dict(zip(technologies, round.(Float64.(tech_df.variable_om), digits=2)))
+    c_efficiency_th = Dict(zip(technologies, round.(Float64.(tech_df.efficiency_th), digits=4)))  # Keep 4 digits for efficiencies
+    c_efficiency_el = Dict(zip(technologies, round.(Float64.(tech_df.efficiency_el), digits=4)))  # Keep 4 digits for efficiencies
     c_energy_carrier = Dict(zip(technologies, Symbol.(tech_df.energy_carrier)))
     c_lifetime_new = Dict(zip(technologies, Int.(tech_df.lifetime_new)))
     c_lifetime_initial = Dict(zip(technologies, Int.(tech_df.lifetime_initial)))
@@ -98,18 +98,22 @@ function load_parameters(excel_path::String)
     stor_df = DataFrame(XLSX.gettable(stor_sheet))
     storage_params = Dict{Symbol, Float64}()
     for row in eachrow(stor_df)
-        storage_params[Symbol(row.parameter)] = Float64(row.value)
+        # Round storage parameters to avoid false precision (4 digits for rates/efficiencies, 2 for costs)
+        param_name = Symbol(row.parameter)
+        value = Float64(row.value)
+        digits = (param_name in [:efficiency, :loss_rate, :max_charge_rate, :max_discharge_rate]) ? 4 : 2
+        storage_params[param_name] = round(value, digits=digits)
     end
 
     # Load EnergyCarriers sheet
     carrier_sheet = xf["EnergyCarriers"]
     carrier_df = DataFrame(XLSX.gettable(carrier_sheet))
-    c_emission_fac = Dict(zip(Symbol.(carrier_df.carrier), Float64.(carrier_df.emission_factor)))
+    c_emission_fac = Dict(zip(Symbol.(carrier_df.carrier), round.(Float64.(carrier_df.emission_factor), digits=4)))
 
     # Load EnergyPriceMap sheet
     energy_price_sheet = xf["EnergyPriceMap"]
     energy_price_df = DataFrame(XLSX.gettable(energy_price_sheet))
-    energy_price_map = Dict(zip(Int.(energy_price_df.state), Float64.(energy_price_df.price_eur_per_mwh)))
+    energy_price_map = Dict(zip(Int.(energy_price_df.state), round.(Float64.(energy_price_df.price_eur_per_mwh), digits=2)))
 
     # Load CarbonTrajectories sheet
     carbon_traj_sheet = xf["CarbonTrajectories"]
@@ -117,31 +121,32 @@ function load_parameters(excel_path::String)
     carbon_trajectories = Dict{Int, Vector{Float64}}()
     for row in eachrow(carbon_traj_df)
         scenario = Int(row.scenario)
-        trajectory = [Float64(row.year_1), Float64(row.year_2), Float64(row.year_3), Float64(row.year_4)]
+        trajectory = round.([Float64(row.year_1), Float64(row.year_2), Float64(row.year_3), Float64(row.year_4)], digits=2)
         carbon_trajectories[scenario] = trajectory
     end
 
     # Load CarbonProbabilities sheet
     carbon_prob_sheet = xf["CarbonProbabilities"]
     carbon_prob_df = DataFrame(XLSX.gettable(carbon_prob_sheet))
-    carbon_probabilities = Dict(zip(Int.(carbon_prob_df.scenario), Float64.(carbon_prob_df.probability)))
+    carbon_probabilities = Dict(zip(Int.(carbon_prob_df.scenario), round.(Float64.(carbon_prob_df.probability), digits=4)))
 
     # Load DemandUncertainty sheet
     demand_unc_sheet = xf["DemandUncertainty"]
     demand_unc_df = DataFrame(XLSX.gettable(demand_unc_sheet))
-    demand_multipliers = Float64.(demand_unc_df.multiplier)
-    demand_probabilities = Float64.(demand_unc_df.probability)
+    demand_multipliers = round.(Float64.(demand_unc_df.multiplier), digits=4)  # 4 digits for multipliers like 0.95, 1.05
+    demand_probabilities = round.(Float64.(demand_unc_df.probability), digits=4)
 
     # Load EnergyTransitions sheet
     energy_trans_sheet = xf["EnergyTransitions"]
     energy_trans_df = DataFrame(XLSX.gettable(energy_trans_sheet))
     energy_transitions = Matrix{Float64}(undef, 3, 3)
     for (i, row) in enumerate(eachrow(energy_trans_df))
-        energy_transitions[i, :] = [Float64(row.to_high), Float64(row.to_medium), Float64(row.to_low)]
+        # Round transition probabilities to 4 decimal places
+        energy_transitions[i, :] = round.([Float64(row.to_high), Float64(row.to_medium), Float64(row.to_low)], digits=4)
     end
 
     # Set initial energy distribution (could also be added to Excel if needed)
-    initial_energy_dist = [0.3, 0.4, 0.3]
+    initial_energy_dist = round.([0.3, 0.4, 0.3], digits=4)
 
     # Calculate investment stages
     investment_stages = [0; collect(1:2:(2*T-1))]

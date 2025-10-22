@@ -59,12 +59,15 @@ function load_representative_weeks(data_dir::String, base_annual_demand::Float64
     week_weights = [mean(skipmissing(tsam_data[tsam_data[!, "Typical Week"] .== w, "weight_abs"])) |> float for w in week_ids]
     # Normalize weights to 52 weeks
     week_weights_normalized = week_weights .* (52 / sum(week_weights))
+    # Round weights to avoid false precision (4 decimal places is sufficient)
+    week_weights_normalized = round.(week_weights_normalized, digits=4)
 
     # Scale demand to annual total
     scaling_factor = base_annual_demand /
         sum(sum(week) * w for (week, w) in zip(representative_weeks, week_weights_normalized))
 
-    scaled_weeks = [week .* scaling_factor for week in representative_weeks]
+    # Round demand profiles to 2 decimal places (precision of ~0.01 MW is sufficient)
+    scaled_weeks = [round.(week .* scaling_factor, digits=2) for week in representative_weeks]
 
     println("Representative weeks loaded: $(n_weeks) * $(hours_per_week)h; weights sum = $(sum(week_weights_normalized))")
     println("Week weights: ", week_weights_normalized)
@@ -97,7 +100,8 @@ function hourly_profile_from_full_year(p_full::AbstractVector{<:Real}, start_dt:
         counts[hW] += 1
     end
     @assert all(counts .> 0)
-    return sums ./ counts  # 168-length average price for each hour-of-week
+    # Round electricity prices to 2 decimal places (cent-level precision is sufficient)
+    return round.(sums ./ counts, digits=2)  # 168-length average price for each hour-of-week
 end
 
 """
@@ -130,9 +134,9 @@ function process_electricity_prices(data_dir::String, n_weeks::Int)
     sale_elec_price_2030_weeks = repeat(permutedims(p2030_hw), n_weeks, 1)
     sale_elec_price_2050_weeks = repeat(permutedims(p2050_hw), n_weeks, 1)
 
-    # For now, assume purchase prices as a fraction:
-    purch_elec_price_2030_weeks = sale_elec_price_2030_weeks .* 1.2
-    purch_elec_price_2050_weeks = sale_elec_price_2050_weeks .* 1.2
+    # For now, assume purchase prices as a fraction (rounded to avoid false precision):
+    purch_elec_price_2030_weeks = round.(sale_elec_price_2030_weeks .* 1.2, digits=2)
+    purch_elec_price_2050_weeks = round.(sale_elec_price_2050_weeks .* 1.2, digits=2)
 
     return purch_elec_price_2030_weeks, purch_elec_price_2050_weeks,
            sale_elec_price_2030_weeks, sale_elec_price_2050_weeks
