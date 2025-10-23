@@ -9,9 +9,9 @@ struct ModelParameters
     technologies ::Vector{String}
     config_dict ::Dict
     tech_dict::Dict
-    stor_dict::Dict
+    stor_dict::Dict    
     carrier_dict::Dict
-    carbon_dict::Dict
+    carbon_dict::Dict  #osef
 
     # Demand multipliers
     demand_multipliers::Vector{Float64}

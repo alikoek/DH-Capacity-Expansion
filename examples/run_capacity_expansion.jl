@@ -23,8 +23,8 @@ output_dir = joinpath(project_dir, "output")
 excel_file = joinpath(data_dir, "model_parameters.xlsx")
 
 # Simulation settings
-ITERATION_LIMIT = 1        # Number of SDDP training iterations
-N_SIMULATIONS = 1          # Number of Monte Carlo simulations
+ITERATION_LIMIT = 10        # Number of SDDP training iterations
+N_SIMULATIONS = 100          # Number of Monte Carlo simulations
 RANDOM_SEED = 1234          # Random seed for reproducibility
 RISK_MEASURE = :CVaR        # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95           # CVaR confidence level (if using CVaR)
@@ -46,49 +46,50 @@ println("  Loaded parameters for $(length(params.technologies)) technologies")
 println("  Planning horizon: $(params.config_dict[:T]) model years ($(params.config_dict[:T] * params.config_dict[:T_years]) actual years)")
 println()
 
+println(data_dir)
 # Step 2: Load and process data
 println("Step 2/5: Loading and processing data...")
 data = load_all_data(data_dir)
-println("  Loaded $(data.n_weeks) representative weeks")
-# println(data)
+println("  Loaded $(maximum(data.week_indexes)) representative weeks")
+println()
 
 # Step 3: Build SDDP model
-# println("Step 3/5: Building SDDP model...")
-# model = build_sddp_model(params, data)
-# println("  Model constructed successfully")
-# println()
+println("Step 3/5: Building SDDP model...")
+model = build_sddp_model(params, data)
+println("  Model constructed successfully")
+println()
 
-# # # Step 4: Run training and simulations
-# println("Step 4/5: Training and simulating...")
+# # Step 4: Run training and simulations
+println("Step 4/5: Training and simulating...")
 
-# # Set risk measure
-# if RISK_MEASURE == :CVaR
-#     using SDDP
-#     risk_measure = SDDP.CVaR(CVAR_ALPHA)
-# elseif RISK_MEASURE == :Expectation
-#     using SDDP
-#     risk_measure = SDDP.Expectation()
-# elseif RISK_MEASURE == :WorstCase
-#     using SDDP
-#     risk_measure = SDDP.WorstCase()
-# else
-#     error("Unknown risk measure: $RISK_MEASURE")
-# end
+# Set risk measure
+if RISK_MEASURE == :CVaR
+    using SDDP
+    risk_measure = SDDP.CVaR(CVAR_ALPHA)
+elseif RISK_MEASURE == :Expectation
+    using SDDP
+    risk_measure = SDDP.Expectation()
+elseif RISK_MEASURE == :WorstCase
+    using SDDP
+    risk_measure = SDDP.WorstCase()
+else
+    error("Unknown risk measure: $RISK_MEASURE")
+end
 
-# simulations = run_simulation(
-#     model, params, data;
-#     risk_measure=risk_measure,
-#     iteration_limit=ITERATION_LIMIT,
-#     n_simulations=N_SIMULATIONS,
-#     random_seed=RANDOM_SEED
-# )
-# println()
+simulations = run_simulation(
+    model, params, data;
+    risk_measure=risk_measure,
+    iteration_limit=ITERATION_LIMIT,
+    n_simulations=N_SIMULATIONS,
+    random_seed=RANDOM_SEED
+)
+
 
 # # Step 5: Generate outputs
-# println("Step 5/5: Generating outputs...")
+println("Step 5/5: Generating outputs...")
 
 # # Print summary statistics
-# print_summary_statistics(simulations, params, data)
+print_summary_statistics(simulations, params, data)
 
 # # Export detailed results
 # results_file = joinpath(output_dir, "simulation_results.txt")

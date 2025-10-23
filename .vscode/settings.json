@@ -18,5 +18,14 @@
     "julia.showCodeCells": true,
 
     // Optional: improve startup speed
-    "julia.symbolCacheDownload": true
+    "julia.symbolCacheDownload": true,
+
+    // Force Julia REPL to start in the main project folder
+    "julia.startupShell": "bash",
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    // "julia.execution.setCwd": "workspace",
+
+    // Optional: disable Python/Conda auto-activation
+    "python.terminal.activateEnvironment": false,
+    "python.terminal.launchArgs": []
 }

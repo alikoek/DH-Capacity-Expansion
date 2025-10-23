@@ -1,0 +1,4 @@
+﻿Policy,Weak,Usual,Strong
+Weak,0.8,0.15,0.05
+Usual,0.1,0.8,0.1
+Strong,0.05,0.15,0.8

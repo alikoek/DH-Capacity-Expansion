@@ -12,8 +12,8 @@ Calculate the discount factor for a given stage.
 - `T_years::Int`: Number of years represented by each model year
 - `discount_rate::Float64`: Annual discount rate
 """
-function discount_factor(t::Int, T_years::Int, discount_rate::Float64)
-    exponent = T_years * (ceil(t / 2) - 1)
+function discount_factor(year_start, year_evaluate, discount_rate::Float64)
+    exponent = year_evaluate - year_start
     return 1.0 / (1.0 + discount_rate)^exponent
 end
 

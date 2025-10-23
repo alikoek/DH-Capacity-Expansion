@@ -29,7 +29,12 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     risk_measure=SDDP.CVaR(0.95), iteration_limit=100,
     n_simulations=400, random_seed=1234)
     println("Training SDDP model...")
-    SDDP.train(model; risk_measure=risk_measure, iteration_limit=iteration_limit, log_frequency=100)
+    SDDP.train(model; 
+               risk_measure=risk_measure, 
+               iteration_limit=iteration_limit, 
+               log_frequency=100,
+            #    stopping_rules = [SDDP.BoundStalling(10, 1e-4)],
+               )
 
     println("Optimal Cost: ", SDDP.calculate_bound(model))
 
@@ -37,15 +42,28 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     Random.seed!(random_seed)
 
     println("Running simulations...")
-    simulation_symbols = [:x_demand_mult, :u_production, :u_expansion_tech, :u_expansion_storage,
-        :u_charge, :u_discharge, :u_level, :u_unmet]
+    
+    simulation_symbols = [:x_demand_mult, 
+                          :X_stor,
+                          :X_tech,
+
+                          :U_tech, 
+                          :U_stor,
+
+                          :u_production, 
+                          :u_charge, 
+                          :u_discharge, 
+                          :u_level, 
+                          :u_unmet]
 
     # Add custom recorders for vintage capacity state variables
     custom_recorders = Dict{Symbol,Function}()
 
     for stage in params.investment_stages
         # Record technology vintage capacities
-        tech_symbol = Symbol("cap_vintage_tech_$(stage)")
+        tech_symbol = Symbol("X_tech_avlb")
+        stor_symbol = Symbol("X_stor_avlb")
+
         custom_recorders[tech_symbol] = (sp) -> begin
             result = Dict{Symbol,Float64}()
 
@@ -86,7 +104,11 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
         end
     end
 
-    simulations = SDDP.simulate(model, n_simulations, simulation_symbols; custom_recorders=custom_recorders)
+    simulations = SDDP.simulate(model, 
+                                n_simulations, 
+                                simulation_symbols; 
+                                # custom_recorders=custom_recorders,
+                                skip_undefined_variables=true)
 
     println("Simulations complete.")
 
@@ -113,163 +135,186 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
     println("=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
     println(io, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
 
-    for t in 1:(params.T*2)
-        sp = simulations[1][t]  # Use 1st simulation for detailed output
+    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
+    
+    sim = simulations[1]
+    
+    println("="^35, " TECHNOLOGIES ", "="^35)
+    line_tech = " "^length("       | existing  ")* "|" * join([rpad(tech, 9) for tech in keys(params.tech_dict)], " | ") * " |"
+    println(line_tech)
+    println("="^80)
 
-        if t % 2 == 1  # Investment stages (odd stages)
-            current_year = div(t + 1, 2)
-            println("Year $current_year - Investment Stage")
-            println(io, "Year $current_year - Investment Stage")
+    for t in keys(stage2year_phase)
+        sp = sim[t]  # Use 1st simulation for detailed output
+        if stage2year_phase[t][2] == "investment"  # Investment stages (odd stages)
+            current_year = stage2year_phase[t][1]
+            year = current_year
 
-            # Print technology expansions and alive capacities
-            for tech in params.technologies
-                expansion = value(sp[:u_expansion_tech][tech])
-                println("  Technology: $tech")
-                println("    Expansion = ", expansion, " MW")
-                println(io, "  Technology: $tech")
-                println(io, "    Expansion = ", expansion, " MW")
-
-                # Calculate alive capacity using is_alive() function for validation
-                alive_cap = 0.0
-                println("    Vintage Capacities:")
-                println(io, "    Vintage Capacities:")
-
-                for stage in params.investment_stages
-                    vintage_symbol = Symbol("cap_vintage_tech_$(stage)")
-                    if haskey(sp, vintage_symbol)
-                        vintage_data = sp[vintage_symbol]
-                        if isa(vintage_data, Dict) && haskey(vintage_data, tech)
-                            vintage_cap = vintage_data[tech]
-
-                            if vintage_cap > 0.001  # Only print non-zero vintages
-                                # Apply is_alive logic consistently for ALL stages (same as model)
-                                lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                                alive = is_alive(stage, t, lifetime_dict, tech)
-
-                                status = alive ? "alive" : "retired"
-                                println("      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
-                                println(io, "      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
-
-                                if alive
-                                    alive_cap += vintage_cap
-                                end
-                            end
-                        end
-                    end
-                end
-
-                println("    Total Alive Capacity = ", round(alive_cap, digits=2), " MW")
-                println(io, "    Total Alive Capacity = ", round(alive_cap, digits=2), " MW")
+            tech_current = "       | existing  | "
+            tech_new =     " $year  | installed | "
+            tech_out =     "       | shutdown  | "
+            
+            for tech in keys(params.tech_dict)
+                t_install =  sum(sp[:U_tech][tech])
+                t_shutdown = sum(sp[:X_tech][tech,1].in)
+                t_current =  sum(sp[:X_tech][tech,live].in for live in 1:params.tech_dict[tech]["lifetime_new"])
+                
+                # Format numbers with 2 decimals and padding for up to 5 digits before decimal
+                current_str = lpad(round(t_current, digits=2), 8)  # 8 chars total (5+1+2)
+                install_str = lpad(round(t_install, digits=2), 8)
+                shutdown_str = lpad(round(t_shutdown, digits=2), 8)
+                
+                tech_current = tech_current * " " * current_str * " | "
+                tech_new = tech_new * "+" * install_str * " | "
+                tech_out = tech_out * "-" * shutdown_str * " | "
             end
-
-            # Print storage expansion and alive capacity
-            storage_expansion = value(sp[:u_expansion_storage])
-            println("  Storage:")
-            println("    Expansion = ", storage_expansion, " MWh")
-            println(io, "  Storage:")
-            println(io, "    Expansion = ", storage_expansion, " MWh")
-
-            # Calculate alive storage capacity using is_storage_alive() function
-            alive_storage = 0.0
-            storage_lifetime = Int(params.storage_params[:lifetime])
-            println("    Vintage Capacities:")
-            println(io, "    Vintage Capacities:")
-
-            for stage in params.investment_stages
-                vintage_symbol = Symbol("cap_vintage_stor_$(stage)")
-                if haskey(sp, vintage_symbol)
-                    vintage_cap = sp[vintage_symbol]
-
-                    if vintage_cap > 0.001  # Only print non-zero vintages
-                        # Apply is_storage_alive logic consistently for ALL stages (same as model)
-                        alive = is_storage_alive(stage, t, storage_lifetime)
-
-                        status = alive ? "alive" : "retired"
-                        println("      Stage $stage: $(round(vintage_cap, digits=2)) MWh [$status]")
-                        println(io, "      Stage $stage: $(round(vintage_cap, digits=2)) MWh [$status]")
-
-                        if alive
-                            alive_storage += vintage_cap
-                        end
-                    end
-                end
-            end
-
-            println("    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
-            println(io, "    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
-
-        else  # Operational stages
-            println("Year $(div(t, 2)) - Operational Stage")
-            println(io, "Year $(div(t, 2)) - Operational Stage")
-
-            # Demand information
-            println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
-            println(io, "   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
-
-            # Calculate total annual demand across all representative weeks
-            annual_demand = 0.0
-            for week in 1:data.n_weeks
-                week_demand = sum(data.scaled_weeks[week]) * value(sp[:x_demand_mult].out)
-                annual_demand += week_demand * data.week_weights_normalized[week]
-            end
-
-            println("   Annual Demand = ", annual_demand)
-            println(io, "   Annual Demand = ", annual_demand)
-
-            # Calculate storage charge and discharge totals
-            total_storage_charge = 0.0
-            total_storage_discharge = 0.0
-            for week in 1:data.n_weeks
-                week_charge = sum(value(sp[:u_charge][week, hour]) for hour in 1:data.hours_per_week)
-                week_discharge = sum(value(sp[:u_discharge][week, hour]) for hour in 1:data.hours_per_week)
-                total_storage_charge += week_charge * data.week_weights_normalized[week]
-                total_storage_discharge += week_discharge * data.week_weights_normalized[week]
-            end
-
-            println("    Storage charge total = ", total_storage_charge)
-            println("    Storage discharge total = ", total_storage_discharge)
-            println(io, "    Storage charge total = ", total_storage_charge)
-            println(io, "    Storage discharge total = ", total_storage_discharge)
-
-            # Storage level at end
-            println("    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
-            println(io, "    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
-
-            # Calculate production by technology and unmet demand
-            production_by_tech = Dict{Symbol, Float64}()
-            for tech in params.technologies
-                tech_production = 0.0
-                for week in 1:data.n_weeks
-                    week_tech_production = sum(value(sp[:u_production][tech, week, hour]) for hour in 1:data.hours_per_week)
-                    tech_production += week_tech_production * data.week_weights_normalized[week]
-                end
-                production_by_tech[tech] = tech_production
-            end
-
-            # Calculate total unmet demand
-            total_unmet = 0.0
-            for week in 1:data.n_weeks
-                week_unmet = sum(value(sp[:u_unmet][week, hour]) for hour in 1:data.hours_per_week)
-                total_unmet += week_unmet * data.week_weights_normalized[week]
-            end
-
-            # Print production breakdown
-            println("  Production by Technology:")
-            println(io, "  Production by Technology:")
-            total_production = 0.0
-            for tech in params.technologies
-                tech_prod = production_by_tech[tech]
-                total_production += tech_prod
-                println("    $tech: $(round(tech_prod, digits=2)) MWh")
-                println(io, "    $tech: $(round(tech_prod, digits=2)) MWh")
-            end
-
-            println("  Total Production = ", round(total_production, digits=2), " MWh")
-            println("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
-            println(io, "  Total Production = ", round(total_production, digits=2), " MWh")
-            println(io, "  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
+            println(tech_current)
+            println(tech_new)
+            println(tech_out)
+            println("-"^80)
         end
     end
+
+    println("\n\n\n")
+    println("="^35, " STORAGES ", "="^35)
+    line_tech = " "^length("       | existing ")*" | " * join([rpad(tech, 8) for tech in keys(params.stor_dict)], " | ")* "|"
+    println(line_tech)
+    println("="^80)
+
+    for t in keys(stage2year_phase)
+        sp = sim[t]  # Use 1st simulation for detailed output
+        if stage2year_phase[t][2] == "investment"  # Investment stages (odd stages)
+            current_year = stage2year_phase[t][1]
+            year = current_year
+
+            tech_current = "       | existing  | "
+            tech_new =     " $year  | installed | "
+            tech_out =     "       | shutdown  | "
+            
+            for tech in keys(params.stor_dict)
+                t_install =  sum(sp[:U_stor][tech])
+                t_shutdown = sum(sp[:X_stor][tech,1].in)
+                t_current =  sum(sp[:X_stor][tech,live].in for live in 1:params.stor_dict[tech]["lifetime_new"])
+                
+                # Format numbers with 2 decimals and padding for up to 5 digits before decimal
+                current_str = lpad(round(t_current, digits=2), 8)  # 8 chars total (5+1+2)
+                install_str = lpad(round(t_install, digits=2), 8)
+                shutdown_str = lpad(round(t_shutdown, digits=2), 8)
+                
+                tech_current = tech_current * " " * current_str * " | "
+                tech_new = tech_new * "+" * install_str * " | "
+                tech_out = tech_out * "-" * shutdown_str * " | "
+            end
+            println(tech_current)
+            println(tech_new)
+            println(tech_out)
+            println("-"^80)
+        end
+    end
+    
+
+    for t in keys(stage2year_phase)
+        sp = sim[t]  # Use 1st simulation for detailed output
+        if stage2year_phase[t][2] == "operations"  # Investment stages (odd stages)
+            current_year = stage2year_phase[t][1]
+            year = current_year
+
+            tech_current = "       | existing  | "
+            tech_new =     " $year  | installed | "
+            tech_out =     "       | shutdown  | "
+            
+            for tech in keys(params.stor_dict)
+                t_install =  sum(sp[:U_stor][tech])
+                t_shutdown = sum(sp[:X_stor][tech,1].in)
+                t_current =  sum(sp[:X_stor][tech,live].in for live in 1:params.stor_dict[tech]["lifetime_new"])
+                
+                # Format numbers with 2 decimals and padding for up to 5 digits before decimal
+                current_str = lpad(round(t_current, digits=2), 8)  # 8 chars total (5+1+2)
+                install_str = lpad(round(t_install, digits=2), 8)
+                shutdown_str = lpad(round(t_shutdown, digits=2), 8)
+                
+                tech_current = tech_current * " " * current_str * " | "
+                tech_new = tech_new * "+" * install_str * " | "
+                tech_out = tech_out * "-" * shutdown_str * " | "
+            end
+            println(tech_current)
+            println(tech_new)
+            println(tech_out)
+            println("-"^80)
+        end
+    end
+    #     else  # Operational stages
+    #         println("Year $(div(t, 2)) - Operational Stage")
+    #         println(io, "Year $(div(t, 2)) - Operational Stage")
+
+    #         # Demand information
+    #         println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+    #         println(io, "   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+
+    #         # Calculate total annual demand across all representative weeks
+    #         annual_demand = 0.0
+    #         for week in 1:data.n_weeks
+    #             week_demand = sum(data.scaled_weeks[week]) * value(sp[:x_demand_mult].out)
+    #             annual_demand += week_demand * data.week_weights_normalized[week]
+    #         end
+
+    #         println("   Annual Demand = ", annual_demand)
+    #         println(io, "   Annual Demand = ", annual_demand)
+
+    #         # Calculate storage charge and discharge totals
+    #         total_storage_charge = 0.0
+    #         total_storage_discharge = 0.0
+    #         for week in 1:data.n_weeks
+    #             week_charge = sum(value(sp[:u_charge][week, hour]) for hour in 1:data.hours_per_week)
+    #             week_discharge = sum(value(sp[:u_discharge][week, hour]) for hour in 1:data.hours_per_week)
+    #             total_storage_charge += week_charge * data.week_weights_normalized[week]
+    #             total_storage_discharge += week_discharge * data.week_weights_normalized[week]
+    #         end
+
+    #         println("    Storage charge total = ", total_storage_charge)
+    #         println("    Storage discharge total = ", total_storage_discharge)
+    #         println(io, "    Storage charge total = ", total_storage_charge)
+    #         println(io, "    Storage discharge total = ", total_storage_discharge)
+
+    #         # Storage level at end
+    #         println("    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
+    #         println(io, "    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
+
+    #         # Calculate production by technology and unmet demand
+    #         production_by_tech = Dict{Symbol, Float64}()
+    #         for tech in params.technologies
+    #             tech_production = 0.0
+    #             for week in 1:data.n_weeks
+    #                 week_tech_production = sum(value(sp[:u_production][tech, week, hour]) for hour in 1:data.hours_per_week)
+    #                 tech_production += week_tech_production * data.week_weights_normalized[week]
+    #             end
+    #             production_by_tech[tech] = tech_production
+    #         end
+
+    #         # Calculate total unmet demand
+    #         total_unmet = 0.0
+    #         for week in 1:data.n_weeks
+    #             week_unmet = sum(value(sp[:u_unmet][week, hour]) for hour in 1:data.hours_per_week)
+    #             total_unmet += week_unmet * data.week_weights_normalized[week]
+    #         end
+
+    #         # Print production breakdown
+    #         println("  Production by Technology:")
+    #         println(io, "  Production by Technology:")
+    #         total_production = 0.0
+    #         for tech in params.technologies
+    #             tech_prod = production_by_tech[tech]
+    #             total_production += tech_prod
+    #             println("    $tech: $(round(tech_prod, digits=2)) MWh")
+    #             println(io, "    $tech: $(round(tech_prod, digits=2)) MWh")
+    #         end
+
+    #         println("  Total Production = ", round(total_production, digits=2), " MWh")
+    #         println("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
+    #         println(io, "  Total Production = ", round(total_production, digits=2), " MWh")
+    #         println(io, "  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
+    #     end
+    # end
 
     println("=== END SIMULATION RESULTS ===")
     println(io, "=== END SIMULATION RESULTS ===")
@@ -277,7 +322,7 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
     # Close the output file
     close(io)
 
-    println("\nDetailed simulation results have been written to '$output_file'")
+    println("\nDetailed simulation results have been written to \'$output_file\'")
 end
 
 """
@@ -295,8 +340,15 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     println("SUMMARY STATISTICS")
     println("="^80)
 
+    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
+    
+    all_stages = keys(stage2year_phase)
+    inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]
+    ope_stages = [state for (state, dept) in stage2year_phase if dept[2] == "operations"]
+
+
     # Calculate key metrics
-    total_costs = [sum(simulations[s][t][:stage_objective] for t in 1:(params.T*2)) for s in 1:length(simulations)]
+    total_costs = [sum(simulations[s][t][:stage_objective] for t in all_stages) for s in 1:length(simulations)]
     mean_cost = mean(total_costs)
     std_cost = std(total_costs)
     cvar_95_cost = quantile(total_costs, 0.95)
@@ -308,11 +360,11 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
 
     # Technology investments summary
     println("\nAverage Technology Investments (MW):")
-    for tech in params.technologies
+    for tech in keys(params.tech_dict)
         avg_investment = 0.0
         for sim in 1:length(simulations)
-            for t in collect(1:2:(params.T*2))
-                avg_investment += value(simulations[sim][t][:u_expansion_tech][tech])
+            for t in inv_stages
+                avg_investment += value(simulations[sim][t][:U_tech][tech])
             end
         end
         avg_investment /= length(simulations)
@@ -320,28 +372,32 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     end
 
     # Storage investment summary
-    avg_storage = 0.0
-    for sim in 1:length(simulations)
-        for t in collect(1:2:(params.T*2))
-            avg_storage += value(simulations[sim][t][:u_expansion_storage])
+    println("\nAverage Storage Investments (MW):")
+    for stor in keys(params.stor_dict)
+        avg_storage = 0.0
+        for sim in 1:length(simulations)
+            for t in inv_stages
+                avg_storage += value(simulations[sim][t][:U_stor][stor])
+            end
         end
+        avg_storage /= length(simulations)
+        println("  Storage: $(round(avg_storage, digits=1)) MWh")
     end
-    avg_storage /= length(simulations)
-    println("  Storage: $(round(avg_storage, digits=1)) MWh")
 
     # Unmet demand analysis
     println("\nUnmet Demand Analysis:")
-    for year_idx in 1:params.T
-        t = 2 * year_idx
-        year = 2010 + year_idx * 10
+    for t in ope_stages
+        year = stage2year_phase[t][1]
 
         unmet_values = []
         for sim in 1:length(simulations)
+            state = simulations[sim][t][:node_index][2]
+            policy, price = state2keys[state]
             total_unmet = 0.0
-            for week in 1:data.n_weeks
+            for week in data.week_indexes
                 week_unmet = sum(value(simulations[sim][t][:u_unmet][week, hour])
-                                 for hour in 1:data.hours_per_week)
-                total_unmet += week_unmet * data.week_weights_normalized[week]
+                                 for hour in data.hour_indexes)
+                total_unmet += week_unmet * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)])
             end
             push!(unmet_values, total_unmet)
         end
@@ -356,22 +412,28 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
 
     # Storage utilization
     println("\nStorage Utilization (Year 2050):")
-    t = params.T * 2
+    t = length(keys(stage2year_phase))
+    year = stage2year_phase[t][1]
     storage_utilization = []
-    for sim in 1:length(simulations)
-        total_discharge = 0.0
-        for week in 1:data.n_weeks
-            week_discharge = sum(value(simulations[sim][t][:u_discharge][week, hour])
-                                 for hour in 1:data.hours_per_week)
-            total_discharge += week_discharge * data.week_weights_normalized[week]
+    for stor in keys(params.stor_dict)
+        for sim in 1:length(simulations)
+            state = simulations[sim][t][:node_index][2]
+            policy, price = state2keys[state]
+
+            total_discharge = 0.0
+            for week in data.week_indexes
+                week_discharge = sum(value(simulations[sim][t][:u_discharge][stor,week, hour])
+                                    for hour in data.hour_indexes)
+
+                total_discharge += week_discharge * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)])
+            end
+            push!(storage_utilization, total_discharge)
         end
-        push!(storage_utilization, total_discharge)
-    end
 
-    if length(storage_utilization) > 0 && maximum(storage_utilization) > 0
-        println("  Mean Annual Discharge: $(round(mean(storage_utilization), digits=1)) MWh")
-        println("  Max Annual Discharge: $(round(maximum(storage_utilization), digits=1)) MWh")
+        if length(storage_utilization) > 0 && maximum(storage_utilization) > 0
+            println("  Mean Annual Discharge $(stor): $(round(mean(storage_utilization), digits=1)) MWh")
+            println("  Max Annual Discharge $(stor): $(round(maximum(storage_utilization), digits=1)) MWh")
+        end
     end
-
     println("\n" * "="^80)
 end
