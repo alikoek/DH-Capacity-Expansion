@@ -132,17 +132,17 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
     # Open output file for writing
     io = open(output_file, "w")
 
-    println("=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
     println(io, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
 
     state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
     
     sim = simulations[1]
     
-    println("="^35, " TECHNOLOGIES ", "="^35)
+    println(io, "="^35, " TECHNOLOGIES ", "="^35)
     line_tech = " "^length("       | existing  ")* "|" * join([rpad(tech, 9) for tech in keys(params.tech_dict)], " | ") * " |"
-    println(line_tech)
-    println("="^80)
+    println(io, line_tech)
+    println(io, "="^80)
+    
 
     for t in keys(stage2year_phase)
         sp = sim[t]  # Use 1st simulation for detailed output
@@ -168,18 +168,18 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                 tech_new = tech_new * "+" * install_str * " | "
                 tech_out = tech_out * "-" * shutdown_str * " | "
             end
-            println(tech_current)
-            println(tech_new)
-            println(tech_out)
-            println("-"^80)
+            println(io, tech_current)
+            println(io, tech_new)
+            println(io, tech_out)
+            println(io, "-"^80)
         end
     end
 
-    println("\n\n\n")
-    println("="^35, " STORAGES ", "="^35)
+    println(io, "\n\n")
+    println(io, "="^35, " STORAGES ", "="^35)
     line_tech = " "^length("       | existing ")*" | " * join([rpad(tech, 8) for tech in keys(params.stor_dict)], " | ")* "|"
-    println(line_tech)
-    println("="^80)
+    println(io, line_tech)
+    println(io, "="^80)
 
     for t in keys(stage2year_phase)
         sp = sim[t]  # Use 1st simulation for detailed output
@@ -205,122 +205,98 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                 tech_new = tech_new * "+" * install_str * " | "
                 tech_out = tech_out * "-" * shutdown_str * " | "
             end
-            println(tech_current)
-            println(tech_new)
-            println(tech_out)
-            println("-"^80)
+            println(io, tech_current)
+            println(io, tech_new)
+            println(io, tech_out)
+            println(io, "-"^80)
         end
     end
-    
 
+    println(io, "\n\n")
     for t in keys(stage2year_phase)
         sp = sim[t]  # Use 1st simulation for detailed output
+        state = sp[:node_index][2]
+        policy, price = state2keys[state]
         if stage2year_phase[t][2] == "operations"  # Investment stages (odd stages)
             current_year = stage2year_phase[t][1]
             year = current_year
-
-            tech_current = "       | existing  | "
-            tech_new =     " $year  | installed | "
-            tech_out =     "       | shutdown  | "
             
-            for tech in keys(params.stor_dict)
-                t_install =  sum(sp[:U_stor][tech])
-                t_shutdown = sum(sp[:X_stor][tech,1].in)
-                t_current =  sum(sp[:X_stor][tech,live].in for live in 1:params.stor_dict[tech]["lifetime_new"])
-                
-                # Format numbers with 2 decimals and padding for up to 5 digits before decimal
-                current_str = lpad(round(t_current, digits=2), 8)  # 8 chars total (5+1+2)
-                install_str = lpad(round(t_install, digits=2), 8)
-                shutdown_str = lpad(round(t_shutdown, digits=2), 8)
-                
-                tech_current = tech_current * " " * current_str * " | "
-                tech_new = tech_new * "+" * install_str * " | "
-                tech_out = tech_out * "-" * shutdown_str * " | "
+            println(io,"="^29 *" OPERATIONS "*string(year) * " " *"="^29)
+
+            println(io,rpad("Weeks",10) *  "|"*join([(lpad(week,8)) *  "|" for week in data.week_indexes])*"  Total |")
+
+            println(io,"-"^75)
+
+            # Production
+            for tech in keys(params.tech_dict)
+                tech_line = lpad(tech, 10)*"|"
+                for week in data.week_indexes
+                    prod = sum(sp[:u_production][tech,week,hour] for hour in data.hour_indexes)/ 1e3
+                    tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                end
+                prod = sum(sp[:u_production][tech,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                println(io,tech_line)
             end
-            println(tech_current)
-            println(tech_new)
-            println(tech_out)
-            println("-"^80)
+
+            # Storage out
+            for stor in keys(params.stor_dict)
+                tech_line = lpad(stor, 10)*"|"
+                for week in data.week_indexes
+                    prod = sum(sp[:u_discharge][stor,week,hour] for hour in data.hour_indexes) / 1e3
+                    tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                end
+                prod = sum(sp[:u_discharge][stor,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                println(io,tech_line)
+            end
+
+            # Unmet demand
+            tech_line = lpad("unmet", 10)*"|"
+            for week in data.week_indexes
+                prod = sum(sp[:u_unmet][week,hour] for hour in data.hour_indexes)/ 1e3
+                tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+            end
+            prod = sum(sp[:u_unmet][week,hour]  * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+            tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+            println(io,tech_line)
+
+            println(io,"-"^75)
+            
+            # Storage In
+            for stor in keys(params.stor_dict)
+                tech_line = lpad(stor, 10)*"|"
+                for week in data.week_indexes
+                    prod = sum(sp[:u_charge][stor,week,hour] for hour in data.hour_indexes) / 1e3
+                    tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                end
+                prod = sum(sp[:u_charge][stor,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
+                println(io,tech_line)
+            end
+
+            tech_line = lpad("Demand", 10)*"|"
+            for week in data.week_indexes
+                prod = sum(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "year"] .== year) .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"])
+                data.weeks
+                tech_line  = tech_line * (lpad(round(prod / 1e3, digits=2), 8)) * "|"
+            end
+            prod = sum(sum(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "year"] .== year) .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"]) * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for week in data.week_indexes)
+            
+            tech_line  = tech_line * (lpad(round(prod / 1e3, digits=2), 8)) * "|"
+            println(io,tech_line)
+            # println("-"^70)
         end
     end
-    #     else  # Operational stages
-    #         println("Year $(div(t, 2)) - Operational Stage")
-    #         println(io, "Year $(div(t, 2)) - Operational Stage")
-
-    #         # Demand information
-    #         println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
-    #         println(io, "   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
-
-    #         # Calculate total annual demand across all representative weeks
-    #         annual_demand = 0.0
-    #         for week in 1:data.n_weeks
-    #             week_demand = sum(data.scaled_weeks[week]) * value(sp[:x_demand_mult].out)
-    #             annual_demand += week_demand * data.week_weights_normalized[week]
-    #         end
-
-    #         println("   Annual Demand = ", annual_demand)
-    #         println(io, "   Annual Demand = ", annual_demand)
-
-    #         # Calculate storage charge and discharge totals
-    #         total_storage_charge = 0.0
-    #         total_storage_discharge = 0.0
-    #         for week in 1:data.n_weeks
-    #             week_charge = sum(value(sp[:u_charge][week, hour]) for hour in 1:data.hours_per_week)
-    #             week_discharge = sum(value(sp[:u_discharge][week, hour]) for hour in 1:data.hours_per_week)
-    #             total_storage_charge += week_charge * data.week_weights_normalized[week]
-    #             total_storage_discharge += week_discharge * data.week_weights_normalized[week]
-    #         end
-
-    #         println("    Storage charge total = ", total_storage_charge)
-    #         println("    Storage discharge total = ", total_storage_discharge)
-    #         println(io, "    Storage charge total = ", total_storage_charge)
-    #         println(io, "    Storage discharge total = ", total_storage_discharge)
-
-    #         # Storage level at end
-    #         println("    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
-    #         println(io, "    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
-
-    #         # Calculate production by technology and unmet demand
-    #         production_by_tech = Dict{Symbol, Float64}()
-    #         for tech in params.technologies
-    #             tech_production = 0.0
-    #             for week in 1:data.n_weeks
-    #                 week_tech_production = sum(value(sp[:u_production][tech, week, hour]) for hour in 1:data.hours_per_week)
-    #                 tech_production += week_tech_production * data.week_weights_normalized[week]
-    #             end
-    #             production_by_tech[tech] = tech_production
-    #         end
-
-    #         # Calculate total unmet demand
-    #         total_unmet = 0.0
-    #         for week in 1:data.n_weeks
-    #             week_unmet = sum(value(sp[:u_unmet][week, hour]) for hour in 1:data.hours_per_week)
-    #             total_unmet += week_unmet * data.week_weights_normalized[week]
-    #         end
-
-    #         # Print production breakdown
-    #         println("  Production by Technology:")
-    #         println(io, "  Production by Technology:")
-    #         total_production = 0.0
-    #         for tech in params.technologies
-    #             tech_prod = production_by_tech[tech]
-    #             total_production += tech_prod
-    #             println("    $tech: $(round(tech_prod, digits=2)) MWh")
-    #             println(io, "    $tech: $(round(tech_prod, digits=2)) MWh")
-    #         end
-
-    #         println("  Total Production = ", round(total_production, digits=2), " MWh")
-    #         println("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
-    #         println(io, "  Total Production = ", round(total_production, digits=2), " MWh")
-    #         println(io, "  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
-    #     end
-    # end
-
-    println("=== END SIMULATION RESULTS ===")
+    
+    # Close the file after writing
     println(io, "=== END SIMULATION RESULTS ===")
-
-    # Close the output file
     close(io)
+
+    content = read(output_file, String)
+    println("File content:")
+    println(content)
+
 
     println("\nDetailed simulation results have been written to \'$output_file\'")
 end

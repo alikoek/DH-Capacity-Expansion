@@ -23,7 +23,7 @@ output_dir = joinpath(project_dir, "output")
 excel_file = joinpath(data_dir, "model_parameters.xlsx")
 
 # Simulation settings
-ITERATION_LIMIT = 10        # Number of SDDP training iterations
+ITERATION_LIMIT = 300        # Number of SDDP training iterations
 N_SIMULATIONS = 100          # Number of Monte Carlo simulations
 RANDOM_SEED = 1234          # Random seed for reproducibility
 RISK_MEASURE = :CVaR        # Risk measure: :CVaR, :Expectation, or :WorstCase
@@ -92,19 +92,19 @@ println("Step 5/5: Generating outputs...")
 print_summary_statistics(simulations, params, data)
 
 # # Export detailed results
-# results_file = joinpath(output_dir, "simulation_results.txt")
-# export_results(simulations, params, data, results_file)
+results_file = joinpath(output_dir, "simulation_results.txt")
+export_results(simulations, params, data, results_file)
 
 # # Generate visualizations
-# generate_visualizations(simulations, params, data, output_dir=output_dir)
+generate_visualizations(simulations, params, data, output_dir=output_dir)
 
-# println()
-# println("="^80)
-# println("Optimization Complete!")
-# println("="^80)
-# println()
-# println("Output files saved to: $output_dir")
-# println("  - simulation_results.txt: Detailed simulation results")
-# println("  - *.png: Investment and operation plots")
-# println("  - spaghetti_plot.html: Interactive spaghetti plots")
-# println()
+println()
+println("="^80)
+println("Optimization Complete!")
+println("="^80)
+println()
+println("Output files saved to: $output_dir")
+println("  - simulation_results.txt: Detailed simulation results")
+println("  - *.png: Investment and operation plots")
+println("  - spaghetti_plot.html: Interactive spaghetti plots")
+println()
