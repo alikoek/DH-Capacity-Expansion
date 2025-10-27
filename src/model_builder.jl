@@ -242,8 +242,8 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         else
             model_year = Int(ceil(t / 2))
 
-            # Get deterministic energy and carbon prices based on Markovian states
-            nat_gas_price = params.energy_price_map[energy_state]
+            # Get deterministic carrier prices and carbon prices based on Markovian states
+            carrier_prices = params.energy_price_map[energy_state][model_year]
             carbon_price = params.carbon_trajectories[carbon_scenario][model_year]
 
             # Build state transition constraint for cumulative demand multiplier
@@ -389,8 +389,12 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
                 # Operational objective with deterministic energy and carbon prices
                 local df = discount_factor(t, params.T_years, params.discount_rate)
-                local purch_elec_price = model_year <= 2 ? data.purch_elec_price_2030_weeks : data.purch_elec_price_2050_weeks
-                local sale_elec_price = model_year <= 2 ? data.sale_elec_price_2030_weeks : data.sale_elec_price_2050_weeks
+
+                # Select electricity price scenario based on energy_state (correlated with gas prices)
+                # energy_state: 1=low, 2=medium, 3=high
+                local scenario = energy_state == 1 ? :low : (energy_state == 2 ? :medium : :high)
+                local purch_elec_price = data.purch_elec_prices[model_year][scenario]
+                local sale_elec_price = data.sale_elec_prices[model_year][scenario]
 
                 local expr_annual_cost = 0.0
 
@@ -399,15 +403,21 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     for hour in 1:data.hours_per_week
                         # Technology production costs
                         for tech in params.technologies
-                            fuel_cost = 0.0
-                            if params.c_energy_carrier[tech] == :nat_gas
-                                fuel_cost = nat_gas_price
-                            elseif params.c_energy_carrier[tech] == :elec
+                            carrier = params.c_energy_carrier[tech]
+
+                            # Get fuel cost based on carrier type
+                            if carrier == :elec
                                 fuel_cost = purch_elec_price[week, hour]
+                            else
+                                # Use carrier price from energy price map
+                                fuel_cost = carrier_prices[carrier]
                             end
 
+                            # Get emission factor (time-varying for electricity, static for others)
+                            emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
+
                             tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
-                                        (fuel_cost + carbon_price * params.c_emission_fac[params.c_energy_carrier[tech]]) *
+                                        (fuel_cost + carbon_price * emission_factor) *
                                         (u_production[tech, week, hour] / params.c_efficiency_th[tech]) -
                                         params.c_efficiency_el[tech] * sale_elec_price[week, hour] *
                                         (u_production[tech, week, hour] / params.c_efficiency_th[tech])

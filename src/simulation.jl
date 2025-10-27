@@ -31,12 +31,14 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     println("Training SDDP model...")
 
     # Train with automatic convergence detection
+    # Cut deletion removes weak cuts with very small coefficients to improve numerical stability
     SDDP.train(
         model;
         risk_measure=risk_measure,
         iteration_limit=iteration_limit,
         log_frequency=50,
         parallel_scheme=SDDP.Threaded(),
+        cut_deletion_minimum=100,  # Remove weak cuts after iteration 100
     )
 
     println("Optimal Cost: ", SDDP.calculate_bound(model))
@@ -309,7 +311,7 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     std_cost = std(total_costs)
     cvar_95_cost = quantile(total_costs, 0.95)
 
-    println("\nTotal System Cost (€ million):")
+    println("\nTotal System Cost (billion SEK / GSEK):")
     println("  Mean: $(round(mean_cost/1e6, digits=2))")
     println("  Std Dev: $(round(std_cost/1e6, digits=2))")
     println("  CVaR 95%: $(round(cvar_95_cost/1e6, digits=2))")

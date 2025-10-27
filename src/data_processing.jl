@@ -2,7 +2,7 @@
 Data loading and preprocessing for representative weeks and electricity prices
 """
 
-using CSV, DataFrames, Dates, Statistics
+using CSV, DataFrames, Dates, Statistics, XLSX
 
 """
 Structure to hold processed demand and price data
@@ -15,11 +15,10 @@ struct ProcessedData
     week_weights_normalized::Vector{Float64}
     scaled_weeks::Vector{Vector{Float64}}
 
-    # Electricity prices
-    purch_elec_price_2030_weeks::Matrix{Float64}
-    purch_elec_price_2050_weeks::Matrix{Float64}
-    sale_elec_price_2030_weeks::Matrix{Float64}
-    sale_elec_price_2050_weeks::Matrix{Float64}
+    # Electricity prices - 3 scenarios per model year (low, medium, high)
+    # Stored as Dict[model_year][scenario] where scenario ∈ {:low, :medium, :high}
+    purch_elec_prices::Dict{Int, Dict{Symbol, Matrix{Float64}}}
+    sale_elec_prices::Dict{Int, Dict{Symbol, Matrix{Float64}}}
 end
 
 """
@@ -100,46 +99,86 @@ function hourly_profile_from_full_year(p_full::AbstractVector{<:Real}, start_dt:
         counts[hW] += 1
     end
     @assert all(counts .> 0)
-    # Round electricity prices to 2 decimal places (cent-level precision is sufficient)
-    return round.(sums ./ counts, digits=2)  # 168-length average price for each hour-of-week
+    # Convert SEK to TSEK and round to 4 decimal places
+    return round.(sums ./ counts ./ 1000, digits=4)  # 168-length average price for each hour-of-week in TSEK/MWh
 end
 
 """
-    process_electricity_prices(data_dir::String, n_weeks::Int)
+    process_electricity_prices(data_dir::String, n_weeks::Int, model_year::Int, elec_taxes_levies::Float64)
 
-Load and process electricity price data for representative weeks.
+Load and process electricity price data for a specific model year from Stockholm data.
+Creates 3 price scenarios (low, medium, high) where:
+- Low: Nuclear-heavy scenario (low, stable prices)
+- High: Renewable-heavy scenario (high, volatile prices)
+- Medium: Average of low and high
+
+The Excel data represents spot market prices (used as sale prices).
+Purchase prices are calculated by adding taxes and levies to the sale prices.
+
+These are correlated with energy price states (low gas → low elec, etc.)
 
 # Arguments
 - `data_dir::String`: Directory containing the data files
 - `n_weeks::Int`: Number of representative weeks
+- `model_year::Int`: Model year (1, 2, 3, 4 corresponding to 2020, 2030, 2040, 2050)
+- `elec_taxes_levies::Float64`: Taxes and levies to add to spot prices (EUR/MWh)
 
 # Returns
-- Processed electricity price matrices for purchase and sale
+- Tuple of 6 price matrices: (purch_low, sale_low, purch_med, sale_med, purch_high, sale_high)
 """
-function process_electricity_prices(data_dir::String, n_weeks::Int)
-    println("Processing electricity prices...")
+function process_electricity_prices(data_dir::String, n_weeks::Int, model_year::Int, elec_taxes_levies::Float64)
+    println("Processing electricity prices for model year $model_year...")
 
-    # Load or create electricity price data
-    filename_elec_2030 = joinpath(data_dir, "ElectricityPrice2030.csv")
-    filename_elec_2050 = joinpath(data_dir, "ElectricityPrice2050.csv")
+    # Map model years to data years
+    # Model year 1 (2020) → use 2023 data (earliest available)
+    # Model year 2 (2030) → use 2030 data
+    # Model year 3 (2040) → use 2040 data
+    # Model year 4 (2050) → use 2050 data
+    data_year_map = Dict(1 => "2023", 2 => "2030", 3 => "2040", 4 => "2050")
+    data_year = data_year_map[model_year]
 
-    # Load actual price data
-    elec_price_2030_full = CSV.read(filename_elec_2030, DataFrame, delim=",", decimal='.')[:, "price"]
-    elec_price_2050_full = CSV.read(filename_elec_2050, DataFrame, delim=",", decimal='.')[:, "price"]
+    # Load electricity prices from Excel
+    filename_elec = joinpath(data_dir, "ElectricityPrices.xlsx")
+    xf = XLSX.readxlsx(filename_elec)
 
-    p2030_hw = hourly_profile_from_full_year(elec_price_2030_full, DateTime(2030, 1, 1))
-    p2050_hw = hourly_profile_from_full_year(elec_price_2050_full, DateTime(2050, 1, 1))
+    # Load low (nuclear) and high (renewable) price scenarios
+    df_low = DataFrame(XLSX.gettable(xf["Electricity price - low"]))
+    df_high = DataFrame(XLSX.gettable(xf["Electricity price - high"]))
 
-    # Build (n_weeks × 168) matrices consistent with rep-week indexing
-    sale_elec_price_2030_weeks = repeat(permutedims(p2030_hw), n_weeks, 1)
-    sale_elec_price_2050_weeks = repeat(permutedims(p2050_hw), n_weeks, 1)
+    # Extract the specific year column (convert to Float64 vector)
+    elec_price_low_full = Float64.(df_low[:, data_year])
+    elec_price_high_full = Float64.(df_high[:, data_year])
 
-    # For now, assume purchase prices as a fraction (rounded to avoid false precision):
-    purch_elec_price_2030_weeks = round.(sale_elec_price_2030_weeks .* 1.2, digits=2)
-    purch_elec_price_2050_weeks = round.(sale_elec_price_2050_weeks .* 1.2, digits=2)
+    # Convert to hourly profiles (168 hours per week)
+    # Use year from data for datetime (leap year handling)
+    year_num = parse(Int, data_year)
+    p_low_hw = hourly_profile_from_full_year(elec_price_low_full, DateTime(year_num, 1, 1))
+    p_high_hw = hourly_profile_from_full_year(elec_price_high_full, DateTime(year_num, 1, 1))
 
-    return purch_elec_price_2030_weeks, purch_elec_price_2050_weeks,
-           sale_elec_price_2030_weeks, sale_elec_price_2050_weeks
+    # Create MEDIUM scenario as average of low and high (rounded)
+    p_medium_hw = round.((p_low_hw .+ p_high_hw) ./ 2, digits=4)
+
+    # Build (n_weeks × 168) matrices for each scenario
+    # Excel data represents spot market prices (sale prices)
+    sale_elec_price_low = repeat(permutedims(p_low_hw), n_weeks, 1)
+    sale_elec_price_medium = repeat(permutedims(p_medium_hw), n_weeks, 1)
+    sale_elec_price_high = repeat(permutedims(p_high_hw), n_weeks, 1)
+
+    # Purchase prices = sale prices + taxes and levies (rounded)
+    # Note: elec_taxes_levies already converted to TSEK in parameters.jl
+    purch_elec_price_low = round.(sale_elec_price_low .+ elec_taxes_levies, digits=4)
+    purch_elec_price_medium = round.(sale_elec_price_medium .+ elec_taxes_levies, digits=4)
+    purch_elec_price_high = round.(sale_elec_price_high .+ elec_taxes_levies, digits=4)
+
+    println("  Using year $data_year from Stockholm data")
+    println("  Created 3 electricity price scenarios:")
+    println("    Low (nuclear):     mean = $(round(mean(p_low_hw), digits=4)) TSEK/MWh")
+    println("    Medium (average):  mean = $(round(mean(p_medium_hw), digits=4)) TSEK/MWh")
+    println("    High (renewable):  mean = $(round(mean(p_high_hw), digits=4)) TSEK/MWh")
+
+    return purch_elec_price_low, sale_elec_price_low,
+           purch_elec_price_medium, sale_elec_price_medium,
+           purch_elec_price_high, sale_elec_price_high
 end
 
 """
@@ -159,14 +198,20 @@ function load_all_data(params::ModelParameters, data_dir::String)
     n_weeks, hours_per_week, representative_weeks, week_weights_normalized, scaled_weeks =
         load_representative_weeks(data_dir, params.base_annual_demand)
 
-    # Process electricity prices
-    purch_elec_price_2030_weeks, purch_elec_price_2050_weeks,
-    sale_elec_price_2030_weeks, sale_elec_price_2050_weeks =
-        process_electricity_prices(data_dir, n_weeks)
+    # Load electricity prices for all model years
+    purch_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
+    sale_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
+
+    for model_year in 1:params.T
+        purch_low, sale_low, purch_med, sale_med, purch_high, sale_high =
+            process_electricity_prices(data_dir, n_weeks, model_year, params.elec_taxes_levies)
+
+        purch_elec_prices[model_year] = Dict(:low => purch_low, :medium => purch_med, :high => purch_high)
+        sale_elec_prices[model_year] = Dict(:low => sale_low, :medium => sale_med, :high => sale_high)
+    end
 
     return ProcessedData(
         n_weeks, hours_per_week, representative_weeks, week_weights_normalized, scaled_weeks,
-        purch_elec_price_2030_weeks, purch_elec_price_2050_weeks,
-        sale_elec_price_2030_weeks, sale_elec_price_2050_weeks
+        purch_elec_prices, sale_elec_prices
     )
 end
