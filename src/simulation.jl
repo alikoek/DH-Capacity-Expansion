@@ -47,7 +47,7 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     Random.seed!(random_seed)
 
     println("Running simulations...")
-    simulation_symbols = [:x_demand_mult, :u_production, :u_expansion_tech, :u_expansion_storage,
+    simulation_symbols = [:demand_mult_value, :u_production, :u_expansion_tech, :u_expansion_storage,
         :u_charge, :u_discharge, :u_level, :u_unmet]
 
     # Add custom recorders for vintage capacity state variables
@@ -96,7 +96,10 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
         end
     end
 
-    simulations = SDDP.simulate(model, n_simulations, simulation_symbols; parallel_scheme=SDDP.Threaded(), custom_recorders=custom_recorders)
+    simulations = SDDP.simulate(model, n_simulations, simulation_symbols;
+        parallel_scheme=SDDP.Threaded(),
+        custom_recorders=custom_recorders,
+        skip_undefined_variables=true)
 
     println("Simulations complete.")
 
@@ -114,13 +117,16 @@ Export detailed simulation results to a text file.
 - `data::ProcessedData`: Processed data structure
 - `output_file::String`: Path to output file
 """
-function export_results(simulations, params::ModelParameters, data::ProcessedData, output_file::String)
-    println("Exporting simulation results...")
+function export_results(simulations, params::ModelParameters, data::ProcessedData, output_file::String; verbose::Bool=false)
+    println("Exporting simulation results to $output_file...")
+
+    # Helper function: print to console only if verbose
+    vprint(args...) = verbose && println(args...)
 
     # Open output file for writing
     io = open(output_file, "w")
 
-    println("=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
+    vprint("=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
     println(io, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
 
     for t in 1:(params.T*2)
@@ -128,20 +134,20 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
 
         if t % 2 == 1  # Investment stages (odd stages)
             current_year = div(t + 1, 2)
-            println("Year $current_year - Investment Stage")
+            vprint("Year $current_year - Investment Stage")
             println(io, "Year $current_year - Investment Stage")
 
             # Print technology expansions and alive capacities
             for tech in params.technologies
                 expansion = value(sp[:u_expansion_tech][tech])
-                println("  Technology: $tech")
-                println("    Expansion = ", expansion, " MW")
+                vprint("  Technology: $tech")
+                vprint("    Expansion = ", expansion, " MW")
                 println(io, "  Technology: $tech")
                 println(io, "    Expansion = ", expansion, " MW")
 
                 # Calculate alive capacity using is_alive() function for validation
                 alive_cap = 0.0
-                println("    Vintage Capacities:")
+                vprint("    Vintage Capacities:")
                 println(io, "    Vintage Capacities:")
 
                 for stage in params.investment_stages
@@ -157,7 +163,7 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                                 alive = is_alive(stage, t, lifetime_dict, tech)
 
                                 status = alive ? "alive" : "retired"
-                                println("      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
+                                vprint("      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
                                 println(io, "      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
 
                                 if alive
@@ -168,21 +174,21 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                     end
                 end
 
-                println("    Total Alive Capacity = ", round(alive_cap, digits=2), " MW")
+                vprint("    Total Alive Capacity = ", round(alive_cap, digits=2), " MW")
                 println(io, "    Total Alive Capacity = ", round(alive_cap, digits=2), " MW")
             end
 
             # Print storage expansion and alive capacity
             storage_expansion = value(sp[:u_expansion_storage])
-            println("  Storage:")
-            println("    Expansion = ", storage_expansion, " MWh")
+            vprint("  Storage:")
+            vprint("    Expansion = ", storage_expansion, " MWh")
             println(io, "  Storage:")
             println(io, "    Expansion = ", storage_expansion, " MWh")
 
             # Calculate alive storage capacity using is_storage_alive() function
             alive_storage = 0.0
             storage_lifetime = Int(params.storage_params[:lifetime])
-            println("    Vintage Capacities:")
+            vprint("    Vintage Capacities:")
             println(io, "    Vintage Capacities:")
 
             for stage in params.investment_stages
@@ -195,7 +201,7 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                         alive = is_storage_alive(stage, t, storage_lifetime)
 
                         status = alive ? "alive" : "retired"
-                        println("      Stage $stage: $(round(vintage_cap, digits=2)) MWh [$status]")
+                        vprint("      Stage $stage: $(round(vintage_cap, digits=2)) MWh [$status]")
                         println(io, "      Stage $stage: $(round(vintage_cap, digits=2)) MWh [$status]")
 
                         if alive
@@ -205,25 +211,26 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                 end
             end
 
-            println("    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
+            vprint("    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
             println(io, "    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
 
         else  # Operational stages
-            println("Year $(div(t, 2)) - Operational Stage")
+            vprint("Year $(div(t, 2)) - Operational Stage")
             println(io, "Year $(div(t, 2)) - Operational Stage")
 
-            # Demand information
-            println("   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
-            println(io, "   Demand Multiplier (in/out) = ", value(sp[:x_demand_mult].in), " / ", value(sp[:x_demand_mult].out))
+            # Demand information (stage-wise independent)
+            demand_mult = value(sp[:demand_mult_value])
+            vprint("   Demand Multiplier = ", demand_mult)
+            println(io, "   Demand Multiplier = ", demand_mult)
 
             # Calculate total annual demand across all representative weeks
             annual_demand = 0.0
             for week in 1:data.n_weeks
-                week_demand = sum(data.scaled_weeks[week]) * value(sp[:x_demand_mult].out)
+                week_demand = sum(data.scaled_weeks[week]) * demand_mult
                 annual_demand += week_demand * data.week_weights_normalized[week]
             end
 
-            println("   Annual Demand = ", annual_demand)
+            vprint("   Annual Demand = ", annual_demand)
             println(io, "   Annual Demand = ", annual_demand)
 
             # Calculate storage charge and discharge totals
@@ -236,13 +243,13 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                 total_storage_discharge += week_discharge * data.week_weights_normalized[week]
             end
 
-            println("    Storage charge total = ", total_storage_charge)
-            println("    Storage discharge total = ", total_storage_discharge)
+            vprint("    Storage charge total = ", total_storage_charge)
+            vprint("    Storage discharge total = ", total_storage_discharge)
             println(io, "    Storage charge total = ", total_storage_charge)
             println(io, "    Storage discharge total = ", total_storage_discharge)
 
             # Storage level at end
-            println("    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
+            vprint("    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
             println(io, "    Storage level at end = ", value(sp[:u_level][data.n_weeks, data.hours_per_week]))
 
             # Calculate production by technology and unmet demand
@@ -264,30 +271,30 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             end
 
             # Print production breakdown
-            println("  Production by Technology:")
+            vprint("  Production by Technology:")
             println(io, "  Production by Technology:")
             total_production = 0.0
             for tech in params.technologies
                 tech_prod = production_by_tech[tech]
                 total_production += tech_prod
-                println("    $tech: $(round(tech_prod, digits=2)) MWh")
+                vprint("    $tech: $(round(tech_prod, digits=2)) MWh")
                 println(io, "    $tech: $(round(tech_prod, digits=2)) MWh")
             end
 
-            println("  Total Production = ", round(total_production, digits=2), " MWh")
-            println("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
+            vprint("  Total Production = ", round(total_production, digits=2), " MWh")
+            vprint("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
             println(io, "  Total Production = ", round(total_production, digits=2), " MWh")
             println(io, "  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
         end
     end
 
-    println("=== END SIMULATION RESULTS ===")
+    vprint("=== END SIMULATION RESULTS ===")
     println(io, "=== END SIMULATION RESULTS ===")
 
     # Close the output file
     close(io)
 
-    println("\nDetailed simulation results have been written to '$output_file'")
+    vprint("\nDetailed simulation results have been written to '$output_file'")
 end
 
 """

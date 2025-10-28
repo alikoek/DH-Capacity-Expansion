@@ -3,6 +3,10 @@ Simple runner script for District Heating Capacity Expansion optimization
 
 This script demonstrates how to use the DHCapEx module to run a complete
 capacity expansion optimization with representative weeks and storage.
+
+For better performance, run Julia with multiple threads:
+  julia -t auto examples/run_capacity_expansion.jl
+or set the number of threads manually (e.g., julia -t 10)
 """
 
 # Add the src directory to the load path
@@ -25,7 +29,7 @@ excel_file = joinpath(data_dir, "model_parameters.xlsx")
 ITERATION_LIMIT = 1000       # Maximum number of SDDP training iterations (with auto-stop)
 N_SIMULATIONS = 1000         # Number of Monte Carlo simulations
 RANDOM_SEED = 1234           # Random seed for reproducibility
-RISK_MEASURE = :CVaR         # Risk measure: :CVaR, :Expectation, or :WorstCase
+RISK_MEASURE = :Expectation         # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95            # CVaR confidence level (if using CVaR)
 
 ##############################################################################

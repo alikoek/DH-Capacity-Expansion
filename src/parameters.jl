@@ -45,6 +45,7 @@ struct ModelParameters
     demand_probabilities::Vector{Float64}
     energy_transitions::Matrix{Float64}
     initial_energy_dist::Vector{Float64}
+    use_stochastic_demand::Bool
 
     # Investment stages
     investment_stages::Vector{Int}
@@ -80,6 +81,13 @@ function load_parameters(excel_path::String)
     # Convert to TSEK: SEK → TSEK (÷1000)
     c_penalty = round(Float64(get_param("c_penalty")) / 1000, digits=2)
     elec_taxes_levies = round(Float64(get_param("elec_taxes_levies")) / 1000, digits=2)
+
+    # Demand uncertainty switch (default to false/deterministic if not in Excel)
+    use_stochastic_demand = try
+        Bool(get_param("use_stochastic_demand"))
+    catch
+        false  # Default to deterministic
+    end
 
     # Load Technologies sheet
     tech_sheet = xf["Technologies"]
@@ -294,6 +302,7 @@ function load_parameters(excel_path::String)
         storage_params, c_emission_fac, elec_emission_factors,
         energy_price_map, carbon_trajectories, carbon_probabilities,
         demand_multipliers, demand_probabilities, energy_transitions, initial_energy_dist,
+        use_stochastic_demand,
         investment_stages
     )
 end

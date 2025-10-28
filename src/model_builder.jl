@@ -87,6 +87,8 @@ Build the SDDP model for capacity expansion optimization.
 """
 function build_sddp_model(params::ModelParameters, data::ProcessedData)
     println("Building SDDP model...")
+    demand_mode = params.use_stochastic_demand ? "stochastic" : "deterministic"
+    println("  Demand uncertainty: $demand_mode")
 
     # Build transition matrices
     # Build transition matrices using loaded parameters
@@ -141,9 +143,6 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
             # Unmet demand
             0 <= u_unmet[week=1:data.n_weeks, hour=1:data.hours_per_week]
-
-            # State variable for demand multiplier
-            0 <= x_demand_mult, SDDP.State, (initial_value = 1.0)
         end)
 
         # Create vintage capacity variables for technologies
@@ -190,8 +189,6 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
         ################### Investment Stage ###################
         if t % 2 == 1
-            @constraint(sp, x_demand_mult.out == x_demand_mult.in)
-
             # Update vintage capacities for technologies and storage
             # Only iterate over vintage_stages (excludes last investment stage)
             for stage in vintage_stages[2:end]  # Skip stage 0, iterate over investment stages with vintages
@@ -246,22 +243,10 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             carrier_prices = params.energy_price_map[energy_state][model_year]
             carbon_price = params.carbon_trajectories[carbon_scenario][model_year]
 
-            # Build state transition constraint for cumulative demand multiplier
-            # Pattern: x_demand_mult.out = ε_t × x_demand_mult.in
-            # Implemented as: x_demand_mult.out - ε_t × x_demand_mult.in = 0
-            #
-            # IMPORTANT: Constraint built ONCE here with placeholder coefficient.
-            # Actual coefficient (-ε_t) is set inside SDDP.parameterize block below.
-            # The negative sign is required because JuMP normalizes to: x.out + (-ε) × x.in = 0
-            #
-            # ALTERNATIVE APPROACH (from SDDP.jl ARMA tutorial, see https://sddp.dev/stable/tutorial/arma/):
-            # Could use a noise variable instead of coefficient manipulation:
-            #   @variable(sp, ω)
-            #   @constraint(sp, x_demand_mult.out == ε * x_demand_mult.in + ω)
-            #   SDDP.parameterize(...) do noise
-            #       JuMP.fix(ω, noise)
-            #   end
-            demand_mult_transition = @constraint(sp, x_demand_mult.out == x_demand_mult.in)
+            # Demand multiplier: stage-wise independent stochastic variable
+            # This variable will be fixed to a sampled value in SDDP.parameterize() below
+            @variable(sp, demand_mult_value)
+            JuMP.fix(demand_mult_value, 1.0)  # Default value (will be overwritten in parameterize)
 
             # Compute alive capacities for technologies
             capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
@@ -284,16 +269,14 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
-            # Build demand balance constraints including the state variable
-            # Form: production + discharge - charge + unmet = base_demand * x_demand_mult.out
-            # where x_demand_mult.out = ε_t * x_demand_mult.in (set via coefficient in parameterize)
-            # Rewritten as: production + discharge - charge + unmet - base_demand * x_demand_mult.out = 0
-            # The base_demand coefficients are fixed; only the state transition gets updated in parameterize
+            # Demand balance constraints with stage-wise independent demand multiplier
+            # Form: production + discharge - charge + unmet = base_demand * demand_mult_value
+            # where demand_mult_value is fixed to a sampled value in SDDP.parameterize()
             for week in 1:data.n_weeks
                 @constraint(sp, [hour in 1:data.hours_per_week],
                     sum(u_production[tech, week, hour] for tech in params.technologies) +
                     u_discharge[week, hour] - u_charge[week, hour] + u_unmet[week, hour] -
-                    data.scaled_weeks[week][hour] * x_demand_mult.out == 0.0
+                    data.scaled_weeks[week][hour] * demand_mult_value == 0.0
                 )
             end
 
@@ -376,16 +359,19 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
-            # Stage-wise independent demand uncertainty using loaded parameters
-            demand_multipliers = t == 2 ? [1.0] : params.demand_multipliers  # Deterministic first year
-            demand_probabilities = t == 2 ? [1.0] : params.demand_probabilities
+            # Stage-wise independent demand uncertainty
+            # Use deterministic demand (1.0) if switch is off OR for first operational year
+            if !params.use_stochastic_demand || t == 2
+                demand_multipliers = [1.0]
+                demand_probabilities = [1.0]
+            else
+                demand_multipliers = params.demand_multipliers
+                demand_probabilities = params.demand_probabilities
+            end
 
             SDDP.parameterize(sp, demand_multipliers, demand_probabilities) do demand_mult_sample
-                # Update ONLY the state transition constraint coefficient
-                # State transition: x_demand_mult.out = demand_mult_sample * x_demand_mult.in
-                # Implemented as: x_demand_mult.out - demand_mult_sample * x_demand_mult.in = 0
-                # Set the coefficient of x_demand_mult.in to -demand_mult_sample
-                JuMP.set_normalized_coefficient(demand_mult_transition, x_demand_mult.in, -demand_mult_sample)
+                # Fix demand_mult_value to the sampled value
+                JuMP.fix(demand_mult_value, demand_mult_sample)
 
                 # Operational objective with deterministic energy and carbon prices
                 local df = discount_factor(t, params.T_years, params.discount_rate)
