@@ -47,7 +47,7 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
     Random.seed!(random_seed)
 
     println("Running simulations...")
-    simulation_symbols = [:demand_mult_value, :u_production, :u_expansion_tech, :u_expansion_storage,
+    simulation_symbols = [:u_production, :u_expansion_tech, :u_expansion_storage,
         :u_charge, :u_discharge, :u_level, :u_unmet]
 
     # Add custom recorders for vintage capacity state variables
@@ -218,20 +218,15 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             vprint("Year $(div(t, 2)) - Operational Stage")
             println(io, "Year $(div(t, 2)) - Operational Stage")
 
-            # Demand information (stage-wise independent)
-            demand_mult = value(sp[:demand_mult_value])
-            vprint("   Demand Multiplier = ", demand_mult)
-            println(io, "   Demand Multiplier = ", demand_mult)
-
             # Calculate total annual demand across all representative weeks
             annual_demand = 0.0
             for week in 1:data.n_weeks
-                week_demand = sum(data.scaled_weeks[week]) * demand_mult
+                week_demand = sum(data.scaled_weeks[week])
                 annual_demand += week_demand * data.week_weights_normalized[week]
             end
 
-            vprint("   Annual Demand = ", annual_demand)
-            println(io, "   Annual Demand = ", annual_demand)
+            vprint("   Annual Demand = ", annual_demand, " MWh")
+            println(io, "   Annual Demand = ", annual_demand, " MWh")
 
             # Calculate storage charge and discharge totals
             total_storage_charge = 0.0

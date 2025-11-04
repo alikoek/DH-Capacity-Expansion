@@ -186,7 +186,8 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
 
     for (ope_stage, stage) in enumerate(2:2:2*params.T)
         for sim in 1:length(simulations)
-            ope_var_demand[sim, ope_stage] = value(simulations[sim][stage][:x_demand_mult].out) * params.base_annual_demand
+            # Deterministic demand: always use base_annual_demand
+            ope_var_demand[sim, ope_stage] = params.base_annual_demand
         end
     end
 
@@ -266,9 +267,8 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         return total
     end
 
-    SDDP.add_spaghetti(plt; title="Demand_Multiplier") do sp
-        return sp[:x_demand_mult].out
-    end
+    # Note: Demand is deterministic (no x_demand_mult variable)
+    # Removed Demand_Multiplier spaghetti plot
 
     SDDP.add_spaghetti(plt; title="Unmet_Demand") do sp
         total = 0.0

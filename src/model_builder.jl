@@ -87,8 +87,6 @@ Build the SDDP model for capacity expansion optimization.
 """
 function build_sddp_model(params::ModelParameters, data::ProcessedData)
     println("Building SDDP model...")
-    demand_mode = params.use_stochastic_demand ? "stochastic" : "deterministic"
-    println("  Demand uncertainty: $demand_mode")
 
     # Build transition matrices
     # Build transition matrices using loaded parameters
@@ -284,11 +282,6 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             carrier_prices = params.energy_price_map[energy_state][model_year]
             carbon_price = params.carbon_trajectories[carbon_scenario][model_year]
 
-            # Demand multiplier: stage-wise independent stochastic variable
-            # This variable will be fixed to a sampled value in SDDP.parameterize() below
-            @variable(sp, demand_mult_value)
-            JuMP.fix(demand_mult_value, 1.0)  # Default value (will be overwritten in parameterize)
-
             # Compute alive capacities for technologies
             capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
             for tech in params.technologies
@@ -310,14 +303,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
-            # Demand balance constraints with stage-wise independent demand multiplier
-            # Form: production + discharge - charge + unmet = base_demand * demand_mult_value
-            # where demand_mult_value is fixed to a sampled value in SDDP.parameterize()
+            # Demand balance constraints (deterministic demand = base_annual_demand)
+            # Form: production + discharge - charge + unmet = base_demand
             for week in 1:data.n_weeks
                 @constraint(sp, [hour in 1:data.hours_per_week],
                     sum(u_production[tech, week, hour] for tech in params.technologies) +
-                    u_discharge[week, hour] - u_charge[week, hour] + u_unmet[week, hour] -
-                    data.scaled_weeks[week][hour] * demand_mult_value == 0.0
+                    u_discharge[week, hour] - u_charge[week, hour] + u_unmet[week, hour] ==
+                    data.scaled_weeks[week][hour]
                 )
             end
 
@@ -400,70 +392,55 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
-            # Stage-wise independent demand uncertainty
-            # Use deterministic demand (1.0) if switch is off OR for first operational year
-            if !params.use_stochastic_demand || t == 2
-                demand_multipliers = [1.0]
-                demand_probabilities = [1.0]
-            else
-                demand_multipliers = params.demand_multipliers
-                demand_probabilities = params.demand_probabilities
-            end
+            # Operational objective with deterministic energy and carbon prices and demand
+            local df = discount_factor(t, params.T_years, params.discount_rate)
 
-            SDDP.parameterize(sp, demand_multipliers, demand_probabilities) do demand_mult_sample
-                # Fix demand_mult_value to the sampled value
-                JuMP.fix(demand_mult_value, demand_mult_sample)
+            # Select electricity price scenario based on energy_state (correlated with gas prices)
+            # energy_state: 1=low, 2=medium, 3=high
+            local scenario = energy_state == 1 ? :low : (energy_state == 2 ? :medium : :high)
+            local purch_elec_price = data.purch_elec_prices[model_year][scenario]
+            local sale_elec_price = data.sale_elec_prices[model_year][scenario]
 
-                # Operational objective with deterministic energy and carbon prices
-                local df = discount_factor(t, params.T_years, params.discount_rate)
+            local expr_annual_cost = 0.0
 
-                # Select electricity price scenario based on energy_state (correlated with gas prices)
-                # energy_state: 1=low, 2=medium, 3=high
-                local scenario = energy_state == 1 ? :low : (energy_state == 2 ? :medium : :high)
-                local purch_elec_price = data.purch_elec_prices[model_year][scenario]
-                local sale_elec_price = data.sale_elec_prices[model_year][scenario]
+            for week in 1:data.n_weeks
+                week_cost = 0.0
+                for hour in 1:data.hours_per_week
+                    # Technology production costs
+                    for tech in params.technologies
+                        carrier = params.c_energy_carrier[tech]
 
-                local expr_annual_cost = 0.0
-
-                for week in 1:data.n_weeks
-                    week_cost = 0.0
-                    for hour in 1:data.hours_per_week
-                        # Technology production costs
-                        for tech in params.technologies
-                            carrier = params.c_energy_carrier[tech]
-
-                            # Get fuel cost based on carrier type
-                            if carrier == :elec
-                                fuel_cost = purch_elec_price[week, hour]
-                            else
-                                # Use carrier price from energy price map
-                                fuel_cost = carrier_prices[carrier]
-                            end
-
-                            # Get emission factor (time-varying for electricity, static for others)
-                            emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
-
-                            tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
-                                        (fuel_cost + carbon_price * emission_factor) *
-                                        (u_production[tech, week, hour] / params.c_efficiency_th[tech]) -
-                                        params.c_efficiency_el[tech] * sale_elec_price[week, hour] *
-                                        (u_production[tech, week, hour] / params.c_efficiency_th[tech])
-                            week_cost += tech_cost
+                        # Get fuel cost based on carrier type
+                        if carrier == :elec
+                            fuel_cost = purch_elec_price[week, hour]
+                        else
+                            # Use carrier price from energy price map
+                            fuel_cost = carrier_prices[carrier]
                         end
 
-                        # Storage operational cost (only on discharge)
-                        week_cost += params.storage_params[:variable_om] * u_discharge[week, hour]
+                        # Get emission factor (time-varying for electricity, static for others)
+                        emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
 
-                        # Unmet demand penalty
-                        week_cost += params.c_penalty * u_unmet[week, hour]
+                        tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
+                                    (fuel_cost + carbon_price * emission_factor) *
+                                    (u_production[tech, week, hour] / params.c_efficiency_th[tech]) -
+                                    params.c_efficiency_el[tech] * sale_elec_price[week, hour] *
+                                    (u_production[tech, week, hour] / params.c_efficiency_th[tech])
+                        week_cost += tech_cost
                     end
 
-                    # Apply week weight
-                    expr_annual_cost += data.week_weights_normalized[week] * week_cost
+                    # Storage operational cost (only on discharge)
+                    week_cost += params.storage_params[:variable_om] * u_discharge[week, hour]
+
+                    # Unmet demand penalty
+                    week_cost += params.c_penalty * u_unmet[week, hour]
                 end
 
-                @stageobjective(sp, df * (params.T_years * expr_annual_cost - salvage * params.salvage_fraction))
-            end  # End of SDDP.parameterize for demand
+                # Apply week weight
+                expr_annual_cost += data.week_weights_normalized[week] * week_cost
+            end
+
+            @stageobjective(sp, df * (params.T_years * expr_annual_cost - salvage * params.salvage_fraction))
         end
     end
 
