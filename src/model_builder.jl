@@ -207,6 +207,47 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
+            model_year = Int(ceil(t / 2))
+            # Compute alive capacities for technologies in next model year
+            capacity_alive_next_stage = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
+            for tech in params.technologies
+                capacity_expr = 0.0
+                for stage in vintage_stages
+                    lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
+                    if is_alive(stage, t + 2, lifetime_dict, tech)
+                        capacity_expr += cap_vintage_tech[stage][tech].out
+                    end
+                end
+                capacity_alive_next_stage[tech] = capacity_expr
+            end
+
+            # Compute alive storage capacity in next model year
+            storage_cap_next_stage = 0.0
+            for stage in vintage_stages
+                if is_storage_alive(stage, t + 2, Int(params.storage_params[:lifetime]))
+                    storage_cap_next_stage += cap_vintage_stor[stage].out
+                end
+            end
+
+            # Capacity limit constraints for next model year
+            # Only apply limits before the last investment stage (no need to constrain stage 7)
+            # This reduces constraints and improves numerical stability
+            if t < 2 * params.T - 1
+                next_model_year = min(model_year + 1, params.T)  # Bound by final year
+                for tech in params.technologies
+                    limit = params.c_capacity_limits[tech][next_model_year]
+                    if isfinite(limit)
+                        @constraint(sp, capacity_alive_next_stage[tech] <= limit)
+                    end
+                end
+
+                # Storage capacity limit constraint for next model year
+                storage_limit = params.storage_capacity_limits[next_model_year]
+                if isfinite(storage_limit)
+                    @constraint(sp, storage_cap_next_stage <= storage_limit)
+                end
+            end
+
             # Investment objective
             local df = discount_factor(t, params.T_years, params.discount_rate)
 

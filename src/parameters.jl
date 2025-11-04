@@ -29,9 +29,11 @@ struct ModelParameters
     c_energy_carrier::Dict{Symbol, Symbol}
     c_lifetime_new::Dict{Symbol, Int}
     c_lifetime_initial::Dict{Symbol, Int}
+    c_capacity_limits::Dict{Symbol, Vector{Float64}}
 
     # Storage
     storage_params::Dict{Symbol, Float64}
+    storage_capacity_limits::Vector{Float64}
 
     # Energy carriers
     c_emission_fac::Dict{Symbol, Float64}
@@ -118,6 +120,55 @@ function load_parameters(excel_path::String)
     c_energy_carrier = Dict(zip(technologies, Symbol.(tech_df.energy_carrier)))
     c_lifetime_new = Dict(zip(technologies, Int.(tech_df.lifetime_new)))
     c_lifetime_initial = Dict(zip(technologies, Int.(tech_df.lifetime_initial)))
+
+    # Load CapacityLimits sheet
+    cap_limit_sheet = xf["CapacityLimits"]
+    cap_limit_df = DataFrame(XLSX.gettable(cap_limit_sheet))
+
+    # Helper function to get column name for a year (handles bracket notation)
+    function get_year_col(df, base_name)
+        for col_name in names(df)
+            col_base = occursin('[', col_name) ? split(col_name, '[')[1] : col_name
+            if col_base == base_name
+                return col_name
+            end
+        end
+        error("Column starting with '$base_name' not found in CapacityLimits sheet")
+    end
+
+    # Build capacity limits dictionary: tech -> [year_1, year_2, ..., year_T]
+    # Note: -1 in Excel indicates "no limit" and is converted to Inf
+    c_capacity_limits = Dict{Symbol, Vector{Float64}}()
+    storage_capacity_limits = Float64[]
+
+    for row in eachrow(cap_limit_df)
+        tech_or_storage = String(row.technology)
+        limits = Float64[]
+
+        for year in 1:T
+            col_name = get_year_col(cap_limit_df, "year_$(year)")
+            limit_value = Float64(row[col_name])
+
+            # Convert -1 to Inf (meaning no limit)
+            if limit_value < 0
+                push!(limits, Inf)
+            else
+                push!(limits, round(limit_value, digits=2))
+            end
+        end
+
+        # Check if this is storage or a technology
+        if tech_or_storage == "Storage"
+            storage_capacity_limits = limits
+        else
+            c_capacity_limits[Symbol(tech_or_storage)] = limits
+        end
+    end
+
+    # Ensure storage limits were found, otherwise default to no limit
+    if isempty(storage_capacity_limits)
+        storage_capacity_limits = fill(Inf, T)
+    end
 
     # Load Storage sheet
     stor_sheet = xf["Storage"]
@@ -299,7 +350,8 @@ function load_parameters(excel_path::String)
         technologies, c_initial_capacity, c_max_additional_capacity,
         c_investment_cost, c_opex_fixed, c_opex_var, c_efficiency_th,
         c_efficiency_el, c_energy_carrier, c_lifetime_new, c_lifetime_initial,
-        storage_params, c_emission_fac, elec_emission_factors,
+        c_capacity_limits,
+        storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
         energy_price_map, carbon_trajectories, carbon_probabilities,
         demand_multipliers, demand_probabilities, energy_transitions, initial_energy_dist,
         use_stochastic_demand,
