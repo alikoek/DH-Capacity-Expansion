@@ -24,7 +24,7 @@ excel_file = joinpath(data_dir, "model_parameters.xlsx")
 
 # Simulation settings
 ITERATION_LIMIT = 300        # Number of SDDP training iterations
-N_SIMULATIONS = 100          # Number of Monte Carlo simulations
+N_SIMULATIONS = 1000          # Number of Monte Carlo simulations
 RANDOM_SEED = 1234          # Random seed for reproducibility
 RISK_MEASURE = :CVaR        # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95           # CVaR confidence level (if using CVaR)
@@ -40,7 +40,7 @@ println("="^80)
 println()
 
 # Step 1: Load parameters from Excel
-println("Step 1/5: Loading parameters from Excel...")
+println("Step 1/6: Loading parameters from Excel...")
 params = load_parameters(excel_file)
 println("  Loaded parameters for $(length(params.technologies)) technologies")
 println("  Planning horizon: $(params.config_dict[:T]) model years ($(params.config_dict[:T] * params.config_dict[:T_years]) actual years)")
@@ -48,19 +48,24 @@ println()
 
 println(data_dir)
 # Step 2: Load and process data
-println("Step 2/5: Loading and processing data...")
+println("Step 2/6: Loading and processing data...")
 data = load_all_data(data_dir)
+
+# small modifications
+# params.config_dict[:T_years] = data.rep_years[2] - data.rep_years[1]
+
 println("  Loaded $(maximum(data.week_indexes)) representative weeks")
 println()
 
+
 # Step 3: Build SDDP model
-println("Step 3/5: Building SDDP model...")
+println("Step 3/6: Building SDDP model...")
 model = build_sddp_model(params, data)
 println("  Model constructed successfully")
 println()
 
 # # Step 4: Run training and simulations
-println("Step 4/5: Training and simulating...")
+println("Step 4/6: Training ...")
 
 # Set risk measure
 if RISK_MEASURE == :CVaR
@@ -76,17 +81,24 @@ else
     error("Unknown risk measure: $RISK_MEASURE")
 end
 
-simulations = run_simulation(
-    model, params, data;
+simulations = train_model(
+    model;
     risk_measure=risk_measure,
-    iteration_limit=ITERATION_LIMIT,
+    iteration_limit=ITERATION_LIMIT
+)
+SDDP.write_log_to_csv(model,joinpath(output_dir, "training_results.csv"))
+
+
+# # Step 5: Run training and simulations
+println("Step 5/6: Simulating ...")
+simulations = run_simulation(
+    model,
     n_simulations=N_SIMULATIONS,
     random_seed=RANDOM_SEED
 )
 
-
 # # Step 5: Generate outputs
-println("Step 5/5: Generating outputs...")
+println("Step 6/6: Generating outputs...")
 
 # # Print summary statistics
 print_summary_statistics(simulations, params, data)
@@ -108,3 +120,4 @@ println("  - simulation_results.txt: Detailed simulation results")
 println("  - *.png: Investment and operation plots")
 println("  - spaghetti_plot.html: Interactive spaghetti plots")
 println()
+

@@ -19,10 +19,6 @@ struct ProcessedData
     week_indexes::Vector{Int64}
     hour_indexes::Vector{Int64}
     price_scen::Vector{String}
-
-    CO2_data::DataFrame
-    policy_transitions::DataFrame
-    price_transitions::DataFrame
 end
 
 """
@@ -42,7 +38,6 @@ function load_representative_weeks(data_dir::String)
     hours_per_week = 168  # 7 * 24 hours
     project_dir = pwd()
     data_dir = joinpath(project_dir, "data","preprocessed")
-    println(data_dir)
 
     # Load TSAM data
     filename_tsam = joinpath(data_dir, "typical_weeks_all.csv")
@@ -66,25 +61,10 @@ function load_all_data(data_dir::String)
     # Load representative weeks
     weeks, errors, weights = load_representative_weeks(data_dir)
 
-    data_dir = joinpath(project_dir, "data")
-    filename_co2 = joinpath(data_dir, "policy_transitions.csv")
-    policy_transitions = CSV.read(filename_co2, DataFrame)
-
-
-    data_dir = joinpath(project_dir, "data")
-    filename_co2 = joinpath(data_dir, "price_transitions.csv")
-    price_transitions = CSV.read(filename_co2, DataFrame)
-
-    data_dir = joinpath(project_dir, "data")
-    filename_co2 = joinpath(data_dir, "co2_costs.csv")
-    CO2_data = CSV.read(filename_co2, DataFrame)
-
     rep_years = unique(weeks[!,"year"])
     price_scen = unique(weeks[!,"scenario_price"])
     week_indexes = unique(weeks[!,"typical_week"])
     hour_indexes = unique(weeks[!,"hour"])
-    show(sort(rep_years))
-    show(hour_indexes)
 
     return ProcessedData(
         weeks,
@@ -94,11 +74,8 @@ function load_all_data(data_dir::String)
         sort(rep_years),
         week_indexes,
         hour_indexes,
-        price_scen,
-        CO2_data,
-        policy_transitions,
-        price_transitions
+        price_scen
     )
 end
 
-# a = load_all_data(data_dir)ß
+# a = load_all_data(data_dir)

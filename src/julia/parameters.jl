@@ -6,18 +6,19 @@ using XLSX, DataFrames
 using AxisKeys
 
 struct ModelParameters
-    technologies ::Vector{String}
-    config_dict ::Dict
+    technologies::Vector{String}
+    config_dict::Dict
     tech_dict::Dict
-    stor_dict::Dict    
+    stor_dict::Dict
     carrier_dict::Dict
-    carbon_dict::Dict  #osef
+    carbon_df::DataFrame
+    demand_uncertainty_df::DataFrame
+    price_df::DataFrame
+    elec_CO2_df::DataFrame
 
-    # Demand multipliers
-    demand_multipliers::Vector{Float64}
-
-    # Investment stages
-    investment_stages::Vector{Int}
+    dem_uncertainty_df::DataFrame
+    policy_proba_df::DataFrame
+    price_proba_df::DataFrame
 end
 
 """
@@ -42,8 +43,6 @@ function load_parameters(excel_path::String)
     config_sheet = xf["ModelConfig"]
     config_df = DataFrame(XLSX.gettable(config_sheet))
     config_dict = Dict(Symbol(row.parameter) => row.value for row in eachrow(config_df))
-    println(config_dict)
-    T = config_dict[:T]
 
     # Load Technologies sheet
     tech_sheet = xf["Technologies"]
@@ -68,7 +67,7 @@ function load_parameters(excel_path::String)
     )
 
     # Load EnergyCarriers sheet
-    carrier_sheet = xf["EnergyCarriers"]
+    carrier_sheet = xf["EmissionFactors"]
     carrier_df = DataFrame(XLSX.gettable(carrier_sheet))
     # setindex!(carrier_df, carrier_df.carrier)
     carrier_dict = Dict(
@@ -79,24 +78,32 @@ function load_parameters(excel_path::String)
     )
 
     # Load CarbonPrice sheet
-    carbon_sheet = xf["CarbonPrice"]
+    carbon_sheet = xf["CarbonTrajectories"]
     carbon_df = DataFrame(XLSX.gettable(carbon_sheet))
-    # setindex!(carbon_df, carbon_df.year)
-    carbon_dict = Dict(
-        Symbol(row.year) => Dict(
-            name => row[name] for name in names(carbon_df) if name != :parameter
-        )
-        for row in eachrow(carbon_df)
-    )
-
-
+    
     # Load DemandMultipliers sheet
-    demand_sheet = xf["DemandMultipliers"]
-    demand_df = DataFrame(XLSX.gettable(demand_sheet))
-    demand_multipliers = Float64.(demand_df.multiplier)
+    demand_sheet = xf["DemandUncertainty"]
+    demand_uncertainty_df = DataFrame(XLSX.gettable(demand_sheet))
 
-    # Calculate investment stages
-    investment_stages = [0; collect(1:2:(2*T-1))]
+
+    # Load EnergyPrices
+    sheet = xf["EnergyPriceMap"]
+    price_df = DataFrame(XLSX.gettable(sheet))
+    
+
+    # Load ElectricityCO2
+    sheet = xf["EmissionFactorElectricity"]
+    elec_CO2_df = DataFrame(XLSX.gettable(sheet))
+    
+
+    sheet = xf["DemandUncertainty"]
+    dem_uncertainty_df = DataFrame(XLSX.gettable(sheet))
+
+    sheet = xf["CarbonProbabilities"]
+    policy_proba_df = DataFrame(XLSX.gettable(sheet))
+
+    sheet = xf["PriceTransitions"]
+    price_proba_df = DataFrame(XLSX.gettable(sheet))
 
     return ModelParameters(
         technologies,
@@ -104,16 +111,21 @@ function load_parameters(excel_path::String)
         tech_dict,
         stor_dict,
         carrier_dict,
-        carbon_dict,
-        demand_multipliers,
-        investment_stages
+        carbon_df,
+        demand_uncertainty_df,
+        price_df,
+        elec_CO2_df,
+        dem_uncertainty_df,
+        policy_proba_df,
+        price_proba_df
     )
 end
 
 # Define paths
-project_dir = joinpath(dirname(@__DIR__), "..")
-data_dir = joinpath(project_dir, "data")
-print(data_dir)
-output_dir = joinpath(project_dir, "output")
-excel_file = joinpath(data_dir, "model_parameters.xlsx")
-res = load_parameters(excel_file)
+# project_dir = joinpath(dirname(@__DIR__), "..")
+# data_dir = joinpath(project_dir, "data")
+# output_dir = joinpath(project_dir, "output")
+# excel_file = joinpath(data_dir, "model_parameters.xlsx")
+# res = load_parameters(excel_file)
+
+# show(res)

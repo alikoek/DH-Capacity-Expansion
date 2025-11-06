@@ -86,7 +86,7 @@ Generate all visualizations from simulation results.
 function generate_visualizations(simulations, params::ModelParameters, data::ProcessedData; output_dir="output/")
     println("Generating visualizations...")
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
+    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
     
     all_stages = keys(stage2year_phase)
     inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]
@@ -148,6 +148,7 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         policy, price = state2keys[state]
         year, phase = stage2year_phase[t]
         u_prod = simulations[sim][t][:u_production]
+        x_demand_mult = simulations[sim][t][:x_demand_mult].in
         techs, weeks, hours = axes(u_prod)
         for tech in techs, week in weeks, hour in hours
             push!(df_prod, (year, "Production",String(tech), week, hour, u_prod[tech, week, hour]))
@@ -171,15 +172,175 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         end
 
         for week in weeks, hour in hours
-            dem = first(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "hour"] .== hour)  .& (data.weeks[!, "year"] .== (year))  .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"])
+            dem = x_demand_mult * first(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "hour"] .== hour)  .& (data.weeks[!, "year"] .== (year))  .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"])
             push!(df_prod, (year, "Demand", "/", week, hour, dem))
         end
         
     end
     show(df_prod)
-    CSV.write(joinpath(output_dir, "operational_results.csv"), df_prod)
+    CSV.write(joinpath(output_dir, "operational_sim1.csv"), df_prod)
 
+    df_ope_overview = DataFrame(
+        year = Int[],
+        
+        policy = String[],
+        price = String[],
+        prev_policy = String[],
+        prev_price = String[],
+
+        demand_mult = Float64[],
+        prev_demand_mult = Float64[],
+        
+        simulation = Int[],
+        technology = String[],
+        
+        volume = Float64[]
+        # CO2 = Float64[],
+        # cost = Float64[]
+    )
+
+    df_design_overview = DataFrame(
+        year = Int[],
+        
+        policy = String[],
+        price = String[],
+        prev_policy = String[],
+        prev_price = String[],
+
+        demand_mult = Float64[],
+        prev_demand_mult = Float64[],
+        
+        simulation = Int[],
+        technology = String[],
+        
+        installed = Float64[]
+        # CO2 = Float64[],
+        # cost = Float64[]
+    )
+
+    for (index_sim,sim) in enumerate(simulations)
+        prev_policy, prev_price = "/","/"
+        prev_demand_mult = 1.0
+        for t in ope_stages
+            state = sim[t][:node_index][2]
+            policy, price = state2keys[state]
+            year, phase = stage2year_phase[t]
+            X_tech = sim[t][:X_tech]
+            x_demand_mult = sim[t][:x_demand_mult].in
+            
+
+
+            # techs, lives = axes(X_tech)
+            for tech in keys(params.tech_dict)
+                installed = sum(X_tech[tech,lives].in for lives in params.tech_dict[tech]["lifetime_new"])
+                push!(df_design_overview, (year, 
+                                policy,
+                                price, 
+                                prev_policy,
+                                prev_price,
+                                
+                                x_demand_mult,
+                                prev_demand_mult,
+
+                                Int(index_sim),
+                                params.tech_dict[tech]["full_name"],
+
+                                installed,
+                                ))
+            end
+            prev_policy, prev_price = policy, price
+            prev_demand_mult = x_demand_mult
+
+        end
+
+    end
+    show(df_design_overview)
+    CSV.write(joinpath(output_dir, "design_overview.csv"), df_design_overview)
+
+
+    for (index_sim,sim) in enumerate(simulations)
+        prev_policy, prev_price = "/","/"
+        prev_demand_mult = 1.0
+        for t in ope_stages
+            state = sim[t][:node_index][2]
+            policy, price = state2keys[state]
+            year, phase = stage2year_phase[t]
+            u_prod = sim[t][:u_production]
+            x_demand_mult = sim[t][:x_demand_mult].in
+            
+
+
+            techs, weeks, hours = axes(u_prod)
+            for tech in techs
+                prod = sum(u_prod[tech, week, hour] * 
+                            first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) 
+                            for week in weeks, hour in hours
+                            )
+                push!(df_ope_overview, (year, 
+                                policy,
+                                price, 
+                                prev_policy,
+                                prev_price,
+                                
+                                x_demand_mult,
+                                prev_demand_mult,
+
+                                Int(index_sim),
+                                params.tech_dict[tech]["full_name"],
+
+                                prod,
+                                ))
+            end
     
+            u_prod = sim[t][:u_unmet]
+            prod = sum(u_prod[week, hour] * 
+                first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) 
+                for week in weeks, hour in hours
+                )
+            push!(df_ope_overview, (year, 
+                            policy,
+                            price, 
+                            prev_policy,
+                            prev_price,
+                            
+                            x_demand_mult,
+                            prev_demand_mult,
+
+                            index_sim,
+                            "unmet",
+
+                            prod,
+                            ))
+
+            prev_policy, prev_price = policy, price
+            prev_demand_mult = x_demand_mult
+
+        end
+
+    end
+    show(df_ope_overview)
+    CSV.write(joinpath(output_dir, "operational_overview.csv"), df_ope_overview)
+
+
+            # u_prod = simulations[sim][t][:u_charge]
+            # techs, _, _ = axes(u_prod)
+            # for tech in techs, week in weeks, hour in hours
+            #     push!(df_prod, (year, "Charge", String(tech), week, hour, u_prod[tech, week, hour]))
+            # end
+    
+            # u_prod = simulations[sim][t][:u_discharge]
+            # techs, _, _ = axes(u_prod)
+            # for tech in techs, week in weeks, hour in hours
+            #     push!(df_prod, (year, "Discharge", String(tech), week, hour, u_prod[tech, week, hour]))
+            # end
+    
+            # u_prod = simulations[sim][t][:u_unmet]
+            # for week in weeks, hour in hours
+            #     push!(df_prod, (year, "Unmet", "/", week, hour, u_prod[week, hour]))
+            # end
+    
+            
+    # Add the 
 end
     # # 3. Load Duration Curve for Sample Simulation
     # println("Generating load duration curves...")

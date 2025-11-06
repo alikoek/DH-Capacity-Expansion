@@ -25,18 +25,25 @@ Train the SDDP model and run simulations.
 # Returns
 - Simulation results
 """
-function run_simulation(model, params::ModelParameters, data::ProcessedData;
-    risk_measure=SDDP.CVaR(0.95), iteration_limit=100,
-    n_simulations=400, random_seed=1234)
+
+function train_model(model;
+    risk_measure=SDDP.CVaR(0.95), iteration_limit=100)
     println("Training SDDP model...")
     SDDP.train(model; 
                risk_measure=risk_measure, 
                iteration_limit=iteration_limit, 
                log_frequency=100,
-            #    stopping_rules = [SDDP.BoundStalling(10, 1e-4)],
+            #    stopping_rules = [SDDP.BoundStalling(10, 1e-4)]
+            #    dashboard = true
                )
 
     println("Optimal Cost: ", SDDP.calculate_bound(model))
+
+    # Set seed for reproducibility
+end
+
+function run_simulation(model;
+    n_simulations=400, random_seed=1234)
 
     # Set seed for reproducibility
     Random.seed!(random_seed)
@@ -56,53 +63,6 @@ function run_simulation(model, params::ModelParameters, data::ProcessedData;
                           :u_level, 
                           :u_unmet]
 
-    # Add custom recorders for vintage capacity state variables
-    custom_recorders = Dict{Symbol,Function}()
-
-    for stage in params.investment_stages
-        # Record technology vintage capacities
-        tech_symbol = Symbol("X_tech_avlb")
-        stor_symbol = Symbol("X_stor_avlb")
-
-        custom_recorders[tech_symbol] = (sp) -> begin
-            result = Dict{Symbol,Float64}()
-
-            # Search through all variables for matching vintage capacity names
-            for var in JuMP.all_variables(sp)
-                var_name = JuMP.name(var)
-                # Match pattern: cap_vintage_tech_X[Technology]_out
-                for tech in params.technologies
-                    target_name = "cap_vintage_tech_$(stage)[$(tech)]_out"
-                    if var_name == target_name
-                        result[tech] = value(var)
-                        break
-                    end
-                end
-            end
-
-            # Fill in zeros for any missing technologies
-            for tech in params.technologies
-                if !haskey(result, tech)
-                    result[tech] = 0.0
-                end
-            end
-
-            return result
-        end
-
-        # Record storage vintage capacities
-        stor_symbol = Symbol("cap_vintage_stor_$(stage)")
-        custom_recorders[stor_symbol] = (sp) -> begin
-            # Match pattern: cap_vintage_stor_X[X]_out
-            target_name = "cap_vintage_stor_$(stage)[$(stage)]_out"
-            for var in JuMP.all_variables(sp)
-                if JuMP.name(var) == target_name
-                    return value(var)
-                end
-            end
-            return 0.0
-        end
-    end
 
     simulations = SDDP.simulate(model, 
                                 n_simulations, 
@@ -134,12 +94,12 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
 
     println(io, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
+    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
     
     sim = simulations[1]
     
     println(io, "="^35, " TECHNOLOGIES ", "="^35)
-    line_tech = " "^length("       | existing  ")* "|" * join([rpad(tech, 9) for tech in keys(params.tech_dict)], " | ") * " |"
+    line_tech = " "^length("       | existing  ")* "|" * join([rpad(string(tech)[1:min(end,9)], 9) for tech in keys(params.tech_dict)], " | ") * " |"
     println(io, line_tech)
     println(io, "="^80)
     
@@ -229,7 +189,7 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
 
             # Production
             for tech in keys(params.tech_dict)
-                tech_line = lpad(tech, 10)*"|"
+                tech_line = rpad(string(tech)[1:min(end,10)], 10)*"|"
                 for week in data.week_indexes
                     prod = sum(sp[:u_production][tech,week,hour] for hour in data.hour_indexes)/ 1e3
                     tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
@@ -316,7 +276,7 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     println("SUMMARY STATISTICS")
     println("="^80)
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(data.policy_transitions, data.price_transitions, data.rep_years)
+    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
     
     all_stages = keys(stage2year_phase)
     inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]

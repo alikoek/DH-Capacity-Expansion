@@ -37,7 +37,7 @@ module DHCapEx
 export load_parameters, ModelParameters
 export load_all_data, ProcessedData
 export build_sddp_model
-export run_simulation, export_results, print_summary_statistics
+export run_simulation, train_model, export_results, print_summary_statistics
 export generate_visualizations
 
 # Include all module files
