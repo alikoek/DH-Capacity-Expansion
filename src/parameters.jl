@@ -41,8 +41,10 @@ struct ModelParameters
 
     # Uncertainty configurations
     energy_price_map::Dict{Int, Dict{Int, Dict{Symbol, Float64}}}
-    carbon_trajectories::Dict{Int, Vector{Float64}}
-    carbon_probabilities::Dict{Int, Float64}
+    carbon_trajectory::Vector{Float64}  # Single net-zero trajectory
+    temp_scenarios::Vector{Symbol}
+    temp_cop_multipliers::Dict{Symbol, Float64}
+    temp_scenario_probabilities::Dict{Int, Float64}
     demand_multipliers::Vector{Float64}
     demand_probabilities::Vector{Float64}
     energy_transitions::Matrix{Float64}
@@ -51,6 +53,11 @@ struct ModelParameters
 
     # Investment stages
     investment_stages::Vector{Int}
+
+    # Existing capacity retirement and time-varying parameters
+    c_existing_capacity_schedule::Dict{Symbol, Vector{Float64}}
+    waste_chp_efficiency_schedule::Vector{Float64}
+    waste_availability::Vector{Float64}
 end
 
 """
@@ -211,7 +218,7 @@ function load_parameters(excel_path::String)
     end
 
     # Load time-varying electricity emission factors
-    elec_ef_sheet = xf["Emission Factor for electricity"]
+    elec_ef_sheet = xf["Emission_Factor_for_electricity"]
     elec_ef_df = DataFrame(XLSX.gettable(elec_ef_sheet))
 
     # Map model years to data years: 1→2023, 2→2030, 3→2040, 4→2050
@@ -305,23 +312,25 @@ function load_parameters(excel_path::String)
         error("Column starting with '$base_name' not found")
     end
 
-    carbon_trajectories = Dict{Int, Vector{Float64}}()
-    for row in eachrow(carbon_traj_df)
-        scenario = Int(row.scenario)
-        # Convert to TSEK: SEK → TSEK (÷1000)
-        trajectory = round.([
-            Float64(row[find_col(carbon_traj_df, "year_1")]) / 1000,
-            Float64(row[find_col(carbon_traj_df, "year_2")]) / 1000,
-            Float64(row[find_col(carbon_traj_df, "year_3")]) / 1000,
-            Float64(row[find_col(carbon_traj_df, "year_4")]) / 1000
-        ], digits=4)
-        carbon_trajectories[scenario] = trajectory
-    end
+    # Load single carbon trajectory (net-zero path)
+    # Convert to TSEK: SEK → TSEK (÷1000)
+    carbon_trajectory = round.([
+        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_1")]) / 1000,
+        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_2")]) / 1000,
+        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_3")]) / 1000,
+        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_4")]) / 1000
+    ], digits=4)
 
-    # Load CarbonProbabilities sheet
-    carbon_prob_sheet = xf["CarbonProbabilities"]
-    carbon_prob_df = DataFrame(XLSX.gettable(carbon_prob_sheet))
-    carbon_probabilities = Dict(zip(Int.(carbon_prob_df.scenario), round.(Float64.(carbon_prob_df.probability), digits=4)))
+    # Load TemperatureScenarios sheet
+    temp_scen_sheet = xf["TemperatureScenarios"]
+    temp_scen_df = DataFrame(XLSX.gettable(temp_scen_sheet))
+    temp_scenarios = [Symbol(row.description) for row in eachrow(temp_scen_df)]
+    temp_cop_multipliers = Dict(zip(temp_scenarios, round.(Float64.(temp_scen_df.cop_multiplier), digits=4)))
+
+    # Load TemperatureProbabilities sheet
+    temp_prob_sheet = xf["TemperatureProbabilities"]
+    temp_prob_df = DataFrame(XLSX.gettable(temp_prob_sheet))
+    temp_scenario_probabilities = Dict(zip(Int.(temp_prob_df.scenario), round.(Float64.(temp_prob_df.probability), digits=4)))
 
     # Load DemandUncertainty sheet
     demand_unc_sheet = xf["DemandUncertainty"]
@@ -341,8 +350,52 @@ function load_parameters(excel_path::String)
     # Set initial energy distribution (could also be added to Excel if needed)
     initial_energy_dist = round.([0.3, 0.4, 0.3], digits=4)
 
-    # Calculate investment stages
-    investment_stages = [0; collect(1:2:(2*T-1))]
+    # Calculate investment stages (excluding stage 0 - no longer used with retirement schedule)
+    investment_stages = collect(1:2:(2*T-1))
+
+    # Load existing capacity retirement schedule
+    c_existing_capacity_schedule = Dict{Symbol, Vector{Float64}}()
+    if "ExistingCapacitySchedule" in XLSX.sheetnames(xf)
+        schedule_df = DataFrame(XLSX.gettable(xf["ExistingCapacitySchedule"]))
+        for row in eachrow(schedule_df)
+            tech = Symbol(row.technology)
+            schedule = [Float64(row[Symbol("year_$i")]) for i in 1:T]
+            c_existing_capacity_schedule[tech] = schedule
+        end
+        println("  Loaded retirement schedules for $(length(c_existing_capacity_schedule)) technologies")
+    else
+        println("  WARNING: 'ExistingCapacitySchedule' sheet not found - using zero existing capacity")
+    end
+
+    # Load Waste_CHP time-varying efficiency
+    waste_chp_efficiency_schedule = zeros(Float64, T)
+    if "WasteChpEfficiency" in XLSX.sheetnames(xf)
+        eff_df = DataFrame(XLSX.gettable(xf["WasteChpEfficiency"]))
+        if nrow(eff_df) > 0
+            for i in 1:T
+                waste_chp_efficiency_schedule[i] = Float64(eff_df[1, Symbol("year_$i")])
+            end
+            println("  Loaded Waste_CHP time-varying efficiency")
+        end
+    else
+        println("  WARNING: 'WasteChpEfficiency' sheet not found - Waste_CHP will use static efficiency")
+    end
+
+    # Load waste fuel availability constraint
+    waste_availability = zeros(Float64, T)
+    if "WasteAvailability" in XLSX.sheetnames(xf)
+        avail_df = DataFrame(XLSX.gettable(xf["WasteAvailability"]))
+        if nrow(avail_df) > 0
+            for i in 1:T
+                waste_availability[i] = Float64(avail_df[1, Symbol("year_$i")])
+            end
+            println("  Loaded waste availability constraints")
+        end
+    else
+        println("  WARNING: 'WasteAvailability' sheet not found - no waste fuel constraint will be applied")
+        # Set to large values so constraint is non-binding
+        waste_availability = fill(1e6, T)
+    end
 
     return ModelParameters(
         T, T_years, discount_rate, base_annual_demand, salvage_fraction,
@@ -352,9 +405,10 @@ function load_parameters(excel_path::String)
         c_efficiency_el, c_energy_carrier, c_lifetime_new, c_lifetime_initial,
         c_capacity_limits,
         storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
-        energy_price_map, carbon_trajectories, carbon_probabilities,
+        energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_scenario_probabilities,
         demand_multipliers, demand_probabilities, energy_transitions, initial_energy_dist,
         use_stochastic_demand,
-        investment_stages
+        investment_stages,
+        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability
     )
 end

@@ -4,66 +4,59 @@ SDDP model construction for District Heating Capacity Expansion
 
 using SDDP, Gurobi, LinearAlgebra
 
-include("helper_functions.jl")
+# Note: helper_functions.jl is included by DHCapEx.jl module
 
 """
-    build_transition_matrices(T::Int, energy_transitions, initial_energy_dist, carbon_probs)
+    build_transition_matrices(T::Int, energy_transitions, initial_energy_dist, temp_probs)
 
 Build Markovian transition matrices for the policy graph with:
-- Stage 1-2: Deterministic (1 node each)
-- Stage 3: Carbon policy branching (1→3 nodes)
-- Stage 4+: Energy price transitions within carbon scenarios (9 nodes)
+- Stage 1: Temperature scenario branching (1→2 nodes) - EARLY BRANCHING
+- Stage 2: Energy price branching within each temp scenario (2→6 nodes)
+- Stage 3+: Energy price transitions within temperature scenarios (6 nodes)
 
 # Arguments
 - `T::Int`: Number of model years
 - `energy_transitions::Matrix{Float64}`: Energy state transition probabilities (3×3)
 - `initial_energy_dist::Vector{Float64}`: Initial energy distribution (1×3)
-- `carbon_probs::Vector{Float64}`: Carbon policy branching probabilities (1×3)
+- `temp_probs::Vector{Float64}`: Temperature scenario branching probabilities (1×2)
 
 # Returns
 - Vector of transition matrices
 """
 function build_transition_matrices(T::Int, energy_transitions::Matrix{Float64},
     initial_energy_dist::Vector{Float64},
-    carbon_probs::Vector{Float64})
+    temp_probs::Vector{Float64})
 
     transition_matrices = Array{Float64,2}[]
 
     for stage in 1:(2*T)
         if stage == 1
-            # Stage 1: Deterministic root → first investment stage
-            push!(transition_matrices, reshape([1.0], 1, 1))
+            # Stage 1: Temperature scenario branching at root (1 node → 2 nodes)
+            # This makes first investments temperature-aware
+            push!(transition_matrices, reshape(temp_probs, 1, 2))
 
         elseif stage == 2
-            # Stage 2: Deterministic inv → opr (year 1)
-            push!(transition_matrices, reshape([1.0], 1, 1))
-
-        elseif stage == 3
-            # Stage 3: Carbon policy branching (1 node → 3 nodes)
-            push!(transition_matrices, reshape(carbon_probs, 1, 3))
-
-        elseif stage == 4
-            # Stage 4: First energy branching (3 carbon → 9 energy×carbon nodes)
-            # 3×9 matrix: each carbon scenario branches to 3 energy states
-            M = zeros(3, 9)
-            for c in 1:3
-                # Node ordering: (e1,c1), (e2,c1), (e3,c1), (e1,c2), (e2,c2), (e3,c2), (e1,c3), (e2,c3), (e3,c3)
-                cols = (c - 1) * 3 .+ (1:3)
-                M[c, cols] = initial_energy_dist
+            # Stage 2: First energy branching (2 temp → 6 energy×temp nodes)
+            # 2×6 matrix: each temperature scenario branches to 3 energy states
+            M = zeros(2, 6)
+            for temp in 1:2
+                # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
+                cols = (temp - 1) * 3 .+ (1:3)
+                M[temp, cols] = initial_energy_dist
             end
             push!(transition_matrices, M)
 
         elseif isodd(stage)
-            # Odd stages > 4: opr → inv (energy stays same within each carbon scenario)
-            push!(transition_matrices, Matrix{Float64}(I, 9, 9))
+            # Odd stages > 2: opr → inv (energy stays same within each temp scenario)
+            push!(transition_matrices, Matrix{Float64}(I, 6, 6))
 
         else
-            # Even stages > 4: inv → opr (energy transitions within each carbon scenario)
-            # 9×9 block diagonal: energy transitions don't cross carbon scenarios
-            M = zeros(9, 9)
-            for c in 1:3
-                rows = (c - 1) * 3 .+ (1:3)
-                cols = (c - 1) * 3 .+ (1:3)
+            # Even stages > 2: inv → opr (energy transitions within each temp scenario)
+            # 6×6 block diagonal: energy transitions don't cross temperature scenarios
+            M = zeros(6, 6)
+            for temp in 1:2
+                rows = (temp - 1) * 3 .+ (1:3)
+                cols = (temp - 1) * 3 .+ (1:3)
                 M[rows, cols] = energy_transitions
             end
             push!(transition_matrices, M)
@@ -90,28 +83,25 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
     # Build transition matrices
     # Build transition matrices using loaded parameters
-    carbon_probs = [params.carbon_probabilities[i] for i in 1:3]  # Convert Dict to Vector
+    temp_probs = [params.temp_scenario_probabilities[i] for i in 1:2]  # Convert Dict to Vector
     transition_matrices = build_transition_matrices(
         params.T,
         params.energy_transitions,
         params.initial_energy_dist,
-        carbon_probs
+        temp_probs
     )
 
-    # Helper function to decode markov state into (energy_state, carbon_scenario)
+    # Helper function to decode markov state into (energy_state, temp_scenario)
     function decode_markov_state(t::Int, markov_state::Int)
-        if t <= 2
-            # Stages 1-2: Single deterministic state
-            return 1, 1  # energy_state=1 (medium), carbon_scenario=1
-        elseif t == 3
-            # Stage 3: 3 carbon scenarios, energy not yet branched
-            return 1, markov_state  # energy_state=1, carbon_scenario∈{1,2,3}
+        if t == 1
+            # Stage 1: Temperature branching only (2 nodes)
+            return 1, markov_state  # energy_state=1 (default), temp_scenario∈{1,2}
         else
-            # Stages 4+: 9 states representing (energy, carbon) combinations
-            # Node ordering: (e1,c1), (e2,c1), (e3,c1), (e1,c2), (e2,c2), (e3,c2), (e1,c3), (e2,c3), (e3,c3)
-            carbon_scenario = div(markov_state - 1, 3) + 1
+            # Stages 2+: 6 states representing (energy, temp) combinations
+            # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
+            temp_scenario = div(markov_state - 1, 3) + 1
             energy_state = mod(markov_state - 1, 3) + 1
-            return energy_state, carbon_scenario
+            return energy_state, temp_scenario
         end
     end
 
@@ -122,7 +112,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         optimizer=Gurobi.Optimizer
     ) do sp, node
         t, markov_state = node
-        energy_state, carbon_scenario = decode_markov_state(t, markov_state)
+        energy_state, temp_scenario = decode_markov_state(t, markov_state)
 
         # Variables
         @variables(sp, begin
@@ -143,7 +133,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             0 <= u_unmet[week=1:data.n_weeks, hour=1:data.hours_per_week]
         end)
 
-        # Create vintage capacity variables for technologies
+        # Create vintage capacity variables for NEW investments only (no stage 0)
         # Exclude last investment stage (no vintage for investments that won't be used)
         last_inv_stage = 2 * params.T - 1
         vintage_stages = filter(s -> s != last_inv_stage, params.investment_stages)
@@ -151,26 +141,19 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         cap_vintage_tech = Dict()
         cap_vintage_stor = Dict()
 
+        # Create state variables only for NEW investment stages (excluding stage 0)
         for stage in vintage_stages
-            if stage == 0
-                # Initial capacities
-                cap_vintage_tech[stage] = @variable(sp, [tech in params.technologies],
-                    SDDP.State, (initial_value = params.c_initial_capacity[tech]),
-                    lower_bound = 0, upper_bound = 3000,
-                    base_name = "cap_vintage_tech_$(stage)")
-            else
-                # New investment capacities
-                cap_vintage_tech[stage] = @variable(sp, [tech in params.technologies],
-                    SDDP.State, (initial_value = 0),
-                    lower_bound = 0, upper_bound = params.c_max_additional_capacity[tech],
-                    base_name = "cap_vintage_tech_$(stage)")
-            end
+            cap_vintage_tech[stage] = @variable(sp, [tech in params.technologies],
+                SDDP.State, (initial_value = 0),
+                lower_bound = 0, upper_bound = params.c_max_additional_capacity[tech],
+                base_name = "cap_vintage_tech_$(stage)")
         end
 
+        # Storage vintages (also excluding stage 0)
         @variable(
             sp,
             cap_vintage_stor_state[s in vintage_stages], SDDP.State,
-            (initial_value = s == 0 ? params.storage_params[:initial_capacity] : 0.0),
+            (initial_value = 0.0),
             lower_bound = 0,
             upper_bound = params.storage_params[:max_capacity],
             base_name = "cap_vintage_stor_$(s)"
@@ -180,16 +163,11 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             cap_vintage_stor[stage] = cap_vintage_stor_state[stage]
         end
 
-        # Initial capacities stay constant
-        @constraint(sp, [tech in params.technologies],
-            cap_vintage_tech[0][tech].out == cap_vintage_tech[0][tech].in)
-        @constraint(sp, cap_vintage_stor[0].out == cap_vintage_stor[0].in)
-
         ################### Investment Stage ###################
         if t % 2 == 1
             # Update vintage capacities for technologies and storage
-            # Only iterate over vintage_stages (excludes last investment stage)
-            for stage in vintage_stages[2:end]  # Skip stage 0, iterate over investment stages with vintages
+            # Iterate over all vintage_stages (all are NEW investments, no stage 0)
+            for stage in vintage_stages
                 if stage == t
                     # Current investment stage - add new expansions
                     @constraint(sp, [tech in params.technologies],
@@ -206,43 +184,101 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             end
 
             model_year = Int(ceil(t / 2))
-            # Compute alive capacities for technologies in next model year
+            next_model_year = min(model_year + 1, params.T)
+
+            # Compute alive capacities from NEW investments for next model year
             capacity_alive_next_stage = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
             for tech in params.technologies
                 capacity_expr = 0.0
+                # Sum NEW investment vintages only
                 for stage in vintage_stages
-                    lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                    if is_alive(stage, t + 2, lifetime_dict, tech)
+                    if is_alive(stage, t + 2, params.c_lifetime_new, tech)
                         capacity_expr += cap_vintage_tech[stage][tech].out
                     end
                 end
+
+                # Add existing capacity from retirement schedule
+                if haskey(params.c_existing_capacity_schedule, tech)
+                    existing_cap = params.c_existing_capacity_schedule[tech][next_model_year]
+                    capacity_expr += existing_cap
+                end
+
                 capacity_alive_next_stage[tech] = capacity_expr
             end
 
-            # Compute alive storage capacity in next model year
+            # Compute alive storage capacity in next model year (NEW investments only)
             storage_cap_next_stage = 0.0
             for stage in vintage_stages
                 if is_storage_alive(stage, t + 2, Int(params.storage_params[:lifetime]))
                     storage_cap_next_stage += cap_vintage_stor[stage].out
                 end
             end
+            # Add existing storage capacity (assuming it follows same retirement pattern)
+            storage_cap_next_stage += params.storage_params[:initial_capacity]  # Placeholder - adjust if needed
 
-            # Capacity limit constraints for next model year
-            # Only apply limits before the last investment stage (no need to constrain stage 7)
-            # This reduces constraints and improves numerical stability
+            # Multi-year look-ahead capacity limit constraints
+            # Apply constraints for ALL future years, not just next year
+            # This ensures the model plans investments accounting for future retirements
             if t < 2 * params.T - 1
-                next_model_year = min(model_year + 1, params.T)  # Bound by final year
-                for tech in params.technologies
-                    limit = params.c_capacity_limits[tech][next_model_year]
-                    if isfinite(limit)
-                        @constraint(sp, capacity_alive_next_stage[tech] <= limit)
-                    end
-                end
+                # Loop through all future years from current investment decision
+                for future_year in (model_year + 1):params.T
+                    future_stage = 2 * future_year  # Operational stage for that year
 
-                # Storage capacity limit constraint for next model year
-                storage_limit = params.storage_capacity_limits[next_model_year]
-                if isfinite(storage_limit)
-                    @constraint(sp, storage_cap_next_stage <= storage_limit)
+                    # Calculate capacity alive at future_year for each technology
+                    capacity_alive_future = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
+
+                    for tech in params.technologies
+                        capacity_expr = 0.0
+
+                        # Sum NEW investment vintages that will be alive at future_year
+                        for stage in vintage_stages
+                            if is_alive(stage, future_stage, params.c_lifetime_new, tech)
+                                # Use .out for current stage (t), .in for future stages
+                                if stage == t
+                                    capacity_expr += cap_vintage_tech[stage][tech].out
+                                else
+                                    capacity_expr += cap_vintage_tech[stage][tech].in
+                                end
+                            end
+                        end
+
+                        # Add existing capacity from retirement schedule at future_year
+                        if haskey(params.c_existing_capacity_schedule, tech)
+                            existing_cap = params.c_existing_capacity_schedule[tech][future_year]
+                            capacity_expr += existing_cap
+                        end
+
+                        capacity_alive_future[tech] = capacity_expr
+                    end
+
+                    # Apply capacity limits for future_year
+                    for tech in params.technologies
+                        limit = params.c_capacity_limits[tech][future_year]
+                        if isfinite(limit)
+                            @constraint(sp, capacity_alive_future[tech] <= limit)
+                        end
+                    end
+
+                    # Calculate storage capacity alive at future_year
+                    storage_cap_future = 0.0
+                    for stage in vintage_stages
+                        if is_storage_alive(stage, future_stage, Int(params.storage_params[:lifetime]))
+                            # Use .out for current stage, .in for future stages
+                            if stage == t
+                                storage_cap_future += cap_vintage_stor[stage].out
+                            else
+                                storage_cap_future += cap_vintage_stor[stage].in
+                            end
+                        end
+                    end
+                    # Add existing storage capacity (placeholder)
+                    storage_cap_future += params.storage_params[:initial_capacity]
+
+                    # Storage capacity limit constraint for future_year
+                    storage_limit = params.storage_capacity_limits[future_year]
+                    if isfinite(storage_limit)
+                        @constraint(sp, storage_cap_future <= storage_limit)
+                    end
                 end
             end
 
@@ -253,23 +289,30 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             expr_invest = sum(params.c_investment_cost[tech] * u_expansion_tech[tech] for tech in params.technologies)
             expr_invest += params.storage_params[:capacity_cost] * u_expansion_storage
 
-            # Fixed O&M costs for technologies
+            # Fixed O&M costs for NEW investment technologies
             expr_fix_om = 0.0
             for tech in params.technologies
                 for stage in vintage_stages
-                    lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                    if is_alive(stage, t, lifetime_dict, tech)
+                    if is_alive(stage, t, params.c_lifetime_new, tech)
                         expr_fix_om += params.c_opex_fixed[tech] * cap_vintage_tech[stage][tech].in
                     end
                 end
+
+                # Add fixed O&M for existing capacity from retirement schedule
+                if haskey(params.c_existing_capacity_schedule, tech)
+                    existing_cap = params.c_existing_capacity_schedule[tech][model_year]
+                    expr_fix_om += params.c_opex_fixed[tech] * existing_cap
+                end
             end
 
-            # Fixed O&M for storage
+            # Fixed O&M for NEW investment storage
             for stage in vintage_stages
                 if is_storage_alive(stage, t, Int(params.storage_params[:lifetime]))
                     expr_fix_om += params.storage_params[:fixed_om] * cap_vintage_stor[stage].in
                 end
             end
+            # Add fixed O&M for existing storage
+            expr_fix_om += params.storage_params[:fixed_om] * params.storage_params[:initial_capacity]
 
             expr_fix_om *= params.T_years
             @stageobjective(sp, df * (expr_invest + expr_fix_om))
@@ -278,30 +321,39 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         else
             model_year = Int(ceil(t / 2))
 
-            # Get deterministic carrier prices and carbon prices based on Markovian states
+            # Get deterministic carrier prices and carbon price based on Markovian states
             carrier_prices = params.energy_price_map[energy_state][model_year]
-            carbon_price = params.carbon_trajectories[carbon_scenario][model_year]
+            carbon_price = params.carbon_trajectory[model_year]  # Single net-zero trajectory
 
-            # Compute alive capacities for technologies
-            capacity_alive = Dict{Symbol,JuMP.GenericAffExpr{Float64,VariableRef}}()
+            # Compute alive capacities from NEW investments
+            capacity_alive = Dict{Symbol,Union{Float64,JuMP.GenericAffExpr{Float64,VariableRef}}}()
             for tech in params.technologies
                 capacity_expr = 0.0
+                # Sum NEW investment vintages
                 for stage in vintage_stages
-                    lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                    if is_alive(stage, t, lifetime_dict, tech)
+                    if is_alive(stage, t, params.c_lifetime_new, tech)
                         capacity_expr += cap_vintage_tech[stage][tech].in
                     end
                 end
+
+                # Add existing capacity from retirement schedule
+                if haskey(params.c_existing_capacity_schedule, tech)
+                    existing_cap = params.c_existing_capacity_schedule[tech][model_year]
+                    capacity_expr += existing_cap
+                end
+
                 capacity_alive[tech] = capacity_expr
             end
 
-            # Compute alive storage capacity
+            # Compute alive storage capacity from NEW investments
             storage_cap = 0.0
             for stage in vintage_stages
                 if is_storage_alive(stage, t, Int(params.storage_params[:lifetime]))
                     storage_cap += cap_vintage_stor[stage].in
                 end
             end
+            # Add existing storage
+            storage_cap += params.storage_params[:initial_capacity]
 
             # Demand balance constraints (deterministic demand = base_annual_demand)
             # Form: production + discharge - charge + unmet = base_demand
@@ -356,50 +408,86 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 @constraint(sp, u_level[week, data.hours_per_week] <= 0.01 * storage_cap)
             end
 
+            # Waste fuel availability constraint (annual limit on waste input)
+            if :Waste_CHP in params.technologies && params.waste_availability[model_year] < 1e5
+                waste_eff = efficiency_th_adjusted[:Waste_CHP]
+                @constraint(sp,
+                    sum(data.week_weights_normalized[week] *
+                        sum(u_production[:Waste_CHP, week, hour] / waste_eff
+                            for hour in 1:data.hours_per_week)
+                        for week in 1:data.n_weeks)
+                    <= params.waste_availability[model_year]
+                )
+            end
+
             # State updates for capacity vintages (deterministic - same for all demand realizations)
-            for stage in vintage_stages[2:end]
+            for stage in vintage_stages
                 @constraint(sp, [tech in params.technologies],
                     cap_vintage_tech[stage][tech].out == cap_vintage_tech[stage][tech].in)
                 @constraint(sp,
                     cap_vintage_stor[stage].out == cap_vintage_stor[stage].in)
             end
 
-            # Salvage value calculation (deterministic)
+            # Salvage value calculation (deterministic, NEW investments only)
             local salvage = 0.0
             if t == params.T * 2
-                # Technology salvage
+                # Technology salvage (NEW investments only)
                 for tech in params.technologies
                     for stage in vintage_stages
-                        stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
-                        lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
+                        stage_year = Int(ceil(stage / 2))
 
-                        if (model_year - stage_year) < lifetime_dict[tech]
-                            remaining_life = lifetime_dict[tech] - (model_year - stage_year)
+                        if (model_year - stage_year) < params.c_lifetime_new[tech]
+                            remaining_life = params.c_lifetime_new[tech] - (model_year - stage_year)
                             salvage += params.c_investment_cost[tech] * cap_vintage_tech[stage][tech].in *
-                                       (remaining_life / lifetime_dict[tech])
+                                       (remaining_life / params.c_lifetime_new[tech])
                         end
                     end
+                    # Note: Existing capacity has no salvage value (already built)
                 end
 
-                # Storage salvage
+                # Storage salvage (NEW investments only)
                 for stage in vintage_stages
-                    stage_year = (stage == 0) ? 0 : Int(ceil(stage / 2))
+                    stage_year = Int(ceil(stage / 2))
                     if (model_year - stage_year) < params.storage_params[:lifetime]
                         remaining_life = params.storage_params[:lifetime] - (model_year - stage_year)
                         salvage += params.storage_params[:capacity_cost] * cap_vintage_stor[stage].in *
                                    (remaining_life / params.storage_params[:lifetime])
                     end
                 end
+                # Note: Existing storage has no salvage value
             end
 
             # Operational objective with deterministic energy and carbon prices and demand
             local df = discount_factor(t, params.T_years, params.discount_rate)
 
             # Select electricity price scenario based on energy_state (correlated with gas prices)
-            # energy_state: 1=low, 2=medium, 3=high
-            local scenario = energy_state == 1 ? :low : (energy_state == 2 ? :medium : :high)
+            # energy_state: 1=high, 2=medium, 3=low (matches Excel energy_price_map)
+            local scenario = energy_state == 1 ? :high : (energy_state == 2 ? :medium : :low)
             local purch_elec_price = data.purch_elec_prices[model_year][scenario]
             local sale_elec_price = data.sale_elec_prices[model_year][scenario]
+
+            # Apply temperature-dependent COP multipliers to HeatPump efficiency
+            temp_scenario_symbol = params.temp_scenarios[temp_scenario]
+            cop_multiplier = params.temp_cop_multipliers[temp_scenario_symbol]
+
+            # Create adjusted efficiencies (temperature and time-varying)
+            efficiency_th_adjusted = Dict{Symbol, Float64}()
+            for tech in params.technologies
+                # Start with base efficiency
+                base_eff = params.c_efficiency_th[tech]
+
+                # Apply Waste_CHP time-varying efficiency if applicable
+                if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
+                    base_eff = params.waste_chp_efficiency_schedule[model_year]
+                end
+
+                # Apply temperature-dependent COP multiplier for heat pumps
+                if tech == :HeatPump
+                    efficiency_th_adjusted[tech] = base_eff * cop_multiplier
+                else
+                    efficiency_th_adjusted[tech] = base_eff
+                end
+            end
 
             local expr_annual_cost = 0.0
 
@@ -421,11 +509,12 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                         # Get emission factor (time-varying for electricity, static for others)
                         emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
 
+                        # Use temperature-adjusted efficiency
                         tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
                                     (fuel_cost + carbon_price * emission_factor) *
-                                    (u_production[tech, week, hour] / params.c_efficiency_th[tech]) -
+                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
                                     params.c_efficiency_el[tech] * sale_elec_price[week, hour] *
-                                    (u_production[tech, week, hour] / params.c_efficiency_th[tech])
+                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
                         week_cost += tech_cost
                     end
 
