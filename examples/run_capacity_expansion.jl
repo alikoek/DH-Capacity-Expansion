@@ -96,6 +96,12 @@ print_summary_statistics(simulations, params, data)
 results_file = joinpath(output_dir, "simulation_results.txt")
 export_results(simulations, params, data, results_file)
 
+# Calculate and export performance metrics
+println("  Calculating performance metrics...")
+metrics = calculate_performance_metrics(simulations, params, data)
+metrics_file = joinpath(output_dir, "performance_metrics.txt")
+export_performance_metrics(metrics, metrics_file)
+
 # Generate visualizations
 generate_visualizations(simulations, params, data; output_dir=output_dir)
 
