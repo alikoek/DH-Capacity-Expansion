@@ -36,3 +36,7 @@ results_archive/
 .claude/
 CLAUDE.md
 .github/copilot-instructions.md
+
+# LaTeX and presentation files
+LaTeX/
+*.png
