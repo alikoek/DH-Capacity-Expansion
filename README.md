@@ -27,6 +27,7 @@ DH-Capacity-Expansion/
 │   ├── helper_functions.jl      # Utility functions
 │   ├── model_builder.jl         # SDDP model construction
 │   ├── simulation.jl            # Training and simulation
+│   ├── simulation_metrics.jl    # Performance metrics calculation
 │   └── visualization.jl         # Plotting functions
 ├── data/
 │   ├── model_parameters.xlsx    # All model parameters (single Excel file)
@@ -277,6 +278,10 @@ simulations = run_simulation(model, params, data;
 generate_visualizations(simulations, params, data; output_dir="output/")
 export_results(simulations, params, data, "output/simulation_results.txt")
 print_summary_statistics(simulations, params, data)
+
+# Calculate performance metrics
+metrics = calculate_performance_metrics(simulations, params, data)
+export_performance_metrics(metrics, "output/performance_metrics.txt")
 ```
 
 ## Advanced Usage
@@ -317,6 +322,7 @@ After running the optimization, the following files are generated in `output/`:
 
 ### Text Output
 - `simulation_results.txt`: Detailed simulation results for each stage
+- `performance_metrics.txt`: Performance metrics (FLH, capacity factors, energy mix, LCOH)
 
 ### Plots
 - `Investments_[Technology].png`: Investment band plots for each technology
