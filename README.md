@@ -10,7 +10,7 @@ A modular Julia framework for optimizing capacity expansion decisions in distric
 - **Three-uncertainty stochastic optimization**:
   - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes
   - **Stage-wise independent demand**: Random demand multipliers at each operational stage
-  - **Early temperature scenario branching**: Two temperature scenarios (Warm/Cold) affecting heat pump efficiency
+  - **Early system temperature scenario branching**: Two DH system temperature scenarios (Low-temp/High-temp) affecting heat pump COP
 - **Risk measures**: CVaR, expectation, worst-case
 - **Vintage tracking**: Tracks capacity by investment year and retirement
 - **Comprehensive visualization**: Investment plots, load duration curves, violin plots, spaghetti plots
@@ -125,10 +125,10 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 **CarbonTrajectory**: Single net-zero carbon price trajectory
 - `year_1` to `year_4`: Carbon price (€/tCO₂) for each model year
 
-**TemperatureScenarios**: Temperature scenario definitions
+**TemperatureScenarios**: System temperature scenario definitions
 - `scenario`: Scenario number (1-2)
-- `description`: Scenario description (Warm, Cold)
-- `cop_multiplier`: COP multiplier for heat pumps (e.g., 1.1 for warm, 0.9 for cold)
+- `description`: Scenario description (Low-temp, High-temp)
+- `cop_multiplier`: COP multiplier for heat pumps (e.g., 1.1 for low-temp DH, 0.9 for high-temp DH)
 - `probability`: Branching probability at stage 1 (must sum to 1.0)
 
 **DemandUncertainty**: Stage-wise independent demand multipliers
@@ -145,15 +145,15 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 
 ## Configuration Examples
 
-### Example 1: Testing Different Temperature Scenarios
+### Example 1: Testing Different System Temperature Scenarios
 
-To analyze sensitivity to temperature uncertainty, modify the **TemperatureScenarios** sheet:
+To analyze sensitivity to DH system temperature levels, modify the **TemperatureScenarios** sheet:
 
-**Scenario: High temperature variability**
+**Scenario: High system temperature variability**
 ```
 scenario | description | cop_multiplier | probability
-1        | Warm        | 1.15           | 0.4
-2        | Cold        | 0.85           | 0.6
+1        | Low-temp    | 1.15           | 0.4
+2        | High-temp   | 0.85           | 0.6
 ```
 
 Or modify the **CarbonTrajectory** sheet for different carbon price assumptions:
@@ -345,15 +345,17 @@ The model uses a two-stage structure alternating between investment and operatio
 
 The model incorporates three types of uncertainty with different probabilistic structures:
 
-#### 1. Early Temperature Scenario Branching
-- **Scenarios**: Warm (COP multiplier = 1.1), Cold (COP multiplier = 0.9)
-- **Probabilities**: [50% Warm, 50% Cold] (configurable)
+#### 1. Early System Temperature Scenario Branching
+- **Scenarios**: Low-temp DH (COP multiplier = 1.1), High-temp DH (COP multiplier = 0.9)
+- **Probabilities**: [50% Low-temp, 50% High-temp] (configurable)
 - **Timing**: Branching occurs at stage 1 (before first investment decision)
-- **Structure**: Early scenario tree - temperature scenario is revealed before any investments
+- **Structure**: Early scenario tree - system temperature regime is revealed before any investments
 - **Impact**: Affects heat pump coefficient of performance (COP) throughout entire planning horizon
-- **Interpretation**: Long-term climate uncertainty that influences initial investment decisions
+- **Interpretation**: Long-term district heating network temperature regime uncertainty (e.g., transition to low-temperature district heating) that influences initial investment decisions
 
-**Key feature**: This is **early branching** - the model knows the temperature scenario before making first investments, allowing temperature-aware capacity planning.
+**Key feature**: This is **early branching** - the model knows the DH system temperature regime before making first investments, allowing temperature-aware capacity planning.
+
+**Note**: Temperature scenarios refer to **district heating system supply/return temperatures** (e.g., 60/40°C vs 90/70°C), not outdoor ambient temperature. Lower system temperatures enable higher heat pump efficiency.
 
 #### 2. Markovian Energy Prices (State-Dependent)
 - **States**: High (45 €/MWh), Medium (30 €/MWh), Low (20 €/MWh)
@@ -393,7 +395,7 @@ For a 4-year horizon (T=4), the model has **39 nodes**:
 
 **Total unique paths**: ~486 scenarios (considering demand uncertainty at operational stages 4-8)
 
-**Key difference from standard SDDP**: Temperature branching occurs at stage 1, allowing the first investment decision to be temperature-aware. This "early branching" structure enables proactive adaptation to long-term climate scenarios.
+**Key difference from standard SDDP**: System temperature branching occurs at stage 1, allowing the first investment decision to be temperature-aware. This "early branching" structure enables proactive adaptation to long-term DH network temperature regime scenarios.
 
 ### Key Features
 - **Vintage tracking**: Capacities tracked by investment year with retirement based on lifetime
@@ -455,11 +457,11 @@ julia examples/run_capacity_expansion.jl
 ```
 **Check**: Does it complete? Are results reasonable?
 
-#### Phase 2: Sensitivity to Temperature Scenarios
+#### Phase 2: Sensitivity to System Temperature Scenarios
 ```
-1. Adjust COP multipliers in TemperatureScenarios (e.g., 1.15 warm, 0.85 cold)
+1. Adjust COP multipliers in TemperatureScenarios (e.g., 1.15 low-temp, 0.85 high-temp)
 2. Re-run and compare investment decisions
-3. Expected: Higher temperature variability → more flexible/robust capacity mix
+3. Expected: Wider temperature range → more flexible/robust capacity mix
 ```
 
 #### Phase 3: Sensitivity to Energy Price Volatility

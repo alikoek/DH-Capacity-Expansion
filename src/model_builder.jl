@@ -10,15 +10,15 @@ using SDDP, Gurobi, LinearAlgebra
     build_transition_matrices(T::Int, energy_transitions, initial_energy_dist, temp_probs)
 
 Build Markovian transition matrices for the policy graph with:
-- Stage 1: Temperature scenario branching (1→2 nodes) - EARLY BRANCHING
-- Stage 2: Energy price branching within each temp scenario (2→6 nodes)
-- Stage 3+: Energy price transitions within temperature scenarios (6 nodes)
+- Stage 1: System temperature scenario branching (1→2 nodes) - EARLY BRANCHING
+- Stage 2: Energy price branching within each system temp scenario (2→6 nodes)
+- Stage 3+: Energy price transitions within system temperature scenarios (6 nodes)
 
 # Arguments
 - `T::Int`: Number of model years
 - `energy_transitions::Matrix{Float64}`: Energy state transition probabilities (3×3)
 - `initial_energy_dist::Vector{Float64}`: Initial energy distribution (1×3)
-- `temp_probs::Vector{Float64}`: Temperature scenario branching probabilities (1×2)
+- `temp_probs::Vector{Float64}`: System temperature scenario branching probabilities (1×2)
 
 # Returns
 - Vector of transition matrices
@@ -31,13 +31,13 @@ function build_transition_matrices(T::Int, energy_transitions::Matrix{Float64},
 
     for stage in 1:(2*T)
         if stage == 1
-            # Stage 1: Temperature scenario branching at root (1 node → 2 nodes)
-            # This makes first investments temperature-aware
+            # Stage 1: System temperature scenario branching at root (1 node → 2 nodes)
+            # This makes first investments aware of DH system temperature regime
             push!(transition_matrices, reshape(temp_probs, 1, 2))
 
         elseif stage == 2
             # Stage 2: First energy branching (2 temp → 6 energy×temp nodes)
-            # 2×6 matrix: each temperature scenario branches to 3 energy states
+            # 2×6 matrix: each system temperature scenario branches to 3 energy states
             M = zeros(2, 6)
             for temp in 1:2
                 # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
@@ -52,7 +52,7 @@ function build_transition_matrices(T::Int, energy_transitions::Matrix{Float64},
 
         else
             # Even stages > 2: inv → opr (energy transitions within each temp scenario)
-            # 6×6 block diagonal: energy transitions don't cross temperature scenarios
+            # 6×6 block diagonal: energy transitions don't cross system temperature scenarios
             M = zeros(6, 6)
             for temp in 1:2
                 rows = (temp - 1) * 3 .+ (1:3)
@@ -94,7 +94,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
     # Helper function to decode markov state into (energy_state, temp_scenario)
     function decode_markov_state(t::Int, markov_state::Int)
         if t == 1
-            # Stage 1: Temperature branching only (2 nodes)
+            # Stage 1: System temperature branching only (2 nodes)
             return 1, markov_state  # energy_state=1 (default), temp_scenario∈{1,2}
         else
             # Stages 2+: 6 states representing (energy, temp) combinations
