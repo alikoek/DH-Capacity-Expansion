@@ -158,9 +158,8 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                             vintage_cap = vintage_data[tech]
 
                             if vintage_cap > 0.001  # Only print non-zero vintages
-                                # Apply is_alive logic consistently for ALL stages (same as model)
-                                lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                                alive = is_alive(stage, t, lifetime_dict, tech)
+                                # Apply is_alive logic (all vintages are NEW investments)
+                                alive = is_alive(stage, t, params.c_lifetime_new, tech)
 
                                 status = alive ? "alive" : "retired"
                                 vprint("      Stage $stage: $(round(vintage_cap, digits=2)) MW [$status]")
@@ -171,6 +170,16 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
                                 end
                             end
                         end
+                    end
+                end
+
+                # Add existing capacity from retirement schedule
+                if haskey(params.c_existing_capacity_schedule, tech)
+                    existing_cap = params.c_existing_capacity_schedule[tech][current_year]
+                    if existing_cap > 0.001
+                        vprint("      Existing capacity: $(round(existing_cap, digits=2)) MW")
+                        println(io, "      Existing capacity: $(round(existing_cap, digits=2)) MW")
+                        alive_cap += existing_cap
                     end
                 end
 

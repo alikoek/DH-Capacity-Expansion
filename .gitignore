@@ -29,3 +29,14 @@ Manifest.toml
 
 # Output files
 output/
+scripts/
+results_archive/
+
+# Claude Code and AI assistant files
+.claude/
+CLAUDE.md
+.github/copilot-instructions.md
+
+# LaTeX and presentation files
+LaTeX/
+*.png

@@ -10,7 +10,7 @@ A modular Julia framework for optimizing capacity expansion decisions in distric
 - **Three-uncertainty stochastic optimization**:
   - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes
   - **Stage-wise independent demand**: Random demand multipliers at each operational stage
-  - **One-time carbon policy branching**: Three carbon policy scenarios (Current policy, Net-zero path, Delayed action)
+  - **Early system temperature scenario branching**: Two DH system temperature scenarios (Low-temp/High-temp) affecting heat pump COP
 - **Risk measures**: CVaR, expectation, worst-case
 - **Vintage tracking**: Tracks capacity by investment year and retirement
 - **Comprehensive visualization**: Investment plots, load duration curves, violin plots, spaghetti plots
@@ -122,15 +122,17 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 - `description`: State description
 - `price_eur_per_mwh`: Natural gas price (€/MWh)
 
-**CarbonTrajectories**: Carbon price trajectories for each policy scenario
-- `scenario`: Scenario number (1-3)
-- `description`: Scenario description
+**CarbonTrajectory**: Single net-zero carbon price trajectory
 - `year_1` to `year_4`: Carbon price (€/tCO₂) for each model year
 
-**CarbonProbabilities**: One-time branching probabilities for carbon scenarios
-- `scenario`: Scenario number
-- `description`: Scenario description
-- `probability`: Branching probability (must sum to 1.0)
+**TemperatureScenarios**: System temperature scenario definitions
+- `scenario`: Scenario number (1-2)
+- `description`: Scenario description (Low-temp, High-temp)
+- `cop_multiplier`: COP multiplier for heat pumps (e.g., 1.1 for low-temp DH, 0.9 for high-temp DH)
+
+**TemperatureProbabilities**: Branching probabilities for temperature scenarios
+- `scenario`: Scenario number (1-2)
+- `probability`: Branching probability at stage 1 (must sum to 1.0)
 
 **DemandUncertainty**: Stage-wise independent demand multipliers
 - `multiplier`: Demand multiplier value
@@ -146,16 +148,23 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 
 ## Configuration Examples
 
-### Example 1: Testing Different Carbon Price Scenarios
+### Example 1: Testing Different System Temperature Scenarios
 
-To analyze sensitivity to carbon pricing, modify the **CarbonTrajectories** sheet:
+To analyze sensitivity to DH system temperature levels, modify the **TemperatureScenarios** sheet:
 
-**Scenario: High carbon prices across all scenarios**
+**Scenario: High system temperature variability**
 ```
-scenario | description           | year_1 | year_2 | year_3 | year_4
-1        | Conservative estimate | 150    | 180    | 210    | 240
-2        | Moderate estimate     | 150    | 200    | 250    | 300
-3        | Aggressive estimate   | 150    | 250    | 350    | 450
+scenario | description | cop_multiplier | probability
+1        | Low-temp    | 1.15           | 0.4
+2        | High-temp   | 0.85           | 0.6
+```
+
+Or modify the **CarbonTrajectory** sheet for different carbon price assumptions:
+
+**Aggressive carbon pricing**
+```
+year_1 | year_2 | year_3 | year_4
+150    | 200    | 250    | 300
 ```
 
 ### Example 2: Modeling High Energy Price Volatility
@@ -219,12 +228,10 @@ parameter | value
 T         | 6     (was 4)
 ```
 
-**Important**: You must also extend **CarbonTrajectories** to include year_5 and year_6:
+**Important**: You must also extend **CarbonTrajectory** to include year_5 and year_6:
 ```
-scenario | description    | year_1 | year_2 | year_3 | year_4 | year_5 | year_6
-1        | Current policy | 100    | 110    | 125    | 140    | 155    | 170
-2        | Net-zero path  | 100    | 150    | 200    | 250    | 300    | 350
-3        | Delayed action | 100    | 100    | 180    | 250    | 320    | 390
+year_1 | year_2 | year_3 | year_4 | year_5 | year_6
+100    | 150    | 200    | 250    | 300    | 350
 ```
 
 ### Example 6: Risk-Averse vs Risk-Neutral Planning
@@ -333,7 +340,7 @@ The model uses a two-stage structure alternating between investment and operatio
 
 ### Operational Stages (even stages: 2, 4, 6, 8)
 - **Decisions**: Production levels, storage charge/discharge, unmet demand
-- **Uncertainty**: Markovian energy prices, stage-wise independent demand, carbon policy scenarios
+- **Uncertainty**: Temperature scenarios, Markovian energy prices, stage-wise independent demand
 - **Costs**: Variable O&M + fuel costs + carbon costs - electricity sales revenue + unmet demand penalty
 - **Temporal resolution**: Representative weeks with hourly granularity
 
@@ -341,16 +348,30 @@ The model uses a two-stage structure alternating between investment and operatio
 
 The model incorporates three types of uncertainty with different probabilistic structures:
 
-#### 1. Markovian Energy Prices (State-Dependent)
+#### 1. Early System Temperature Scenario Branching
+- **Scenarios**: Low-temp DH (COP multiplier = 1.1), High-temp DH (COP multiplier = 0.9)
+- **Probabilities**: [50% Low-temp, 50% High-temp] (configurable)
+- **Timing**: Branching occurs at stage 1 (before first investment decision)
+- **Structure**: Early scenario tree - system temperature regime is revealed before any investments
+- **Impact**: Affects heat pump coefficient of performance (COP) throughout entire planning horizon
+- **Interpretation**: Long-term district heating network temperature regime uncertainty (e.g., transition to low-temperature district heating) that influences initial investment decisions
+
+**Key feature**: This is **early branching** - the model knows the DH system temperature regime before making first investments, allowing temperature-aware capacity planning.
+
+**Note**: Temperature scenarios refer to **district heating system supply/return temperatures** (e.g., 60/40°C vs 90/70°C), not outdoor ambient temperature. Lower system temperatures enable higher heat pump efficiency.
+
+#### 2. Markovian Energy Prices (State-Dependent)
 - **States**: High (45 €/MWh), Medium (30 €/MWh), Low (20 €/MWh)
-- **Transitions**: Between investment → operational stages
+- **Transitions**: Between investment → operational stages within each temperature scenario
 - **Structure**: First-order Markov chain with persistence (diagonal elements = 0.6)
 - **Initial distribution**: [30% High, 40% Medium, 30% Low]
 - **Interpretation**: Energy price regimes that persist but can transition over time
 
 **Example transition**: If energy prices are High in year 1, there's a 60% chance they stay High in year 2, 30% chance they drop to Medium, and 10% chance they drop to Low.
 
-#### 2. Stage-wise Independent Demand (i.i.d.)
+**Note**: Energy price transitions occur independently within each temperature scenario (6 total energy×temperature states).
+
+#### 3. Stage-wise Independent Demand (i.i.d.)
 - **Multipliers**: [1.1, 1.0, 0.9] (High, Normal, Low demand)
 - **Probabilities**: [0.2, 0.5, 0.3]
 - **Timing**: Sampled at each operational stage
@@ -360,31 +381,24 @@ The model incorporates three types of uncertainty with different probabilistic s
 
 **Note**: First model year (stage 2) is deterministic with multiplier = 1.0
 
-#### 3. One-Time Carbon Policy Branching
-- **Scenarios**:
-  1. **Current policy** (40%): Modest carbon price growth [100 → 110 → 125 → 140 €/tCO₂]
-  2. **Net-zero path** (40%): Aggressive carbon pricing [100 → 150 → 200 → 250 €/tCO₂]
-  3. **Delayed action** (20%): Late acceleration [100 → 100 → 180 → 250 €/tCO₂]
-- **Timing**: One-time branching between stages 2 and 3 (year 1 → year 2 transition)
-- **Structure**: Scenario tree (not Markovian) - once a scenario is realized, it persists
-- **Interpretation**: Long-term policy commitment that becomes clear after first operational period
-
 ### Node Structure
 
-For a 4-year horizon (T=4), the model has **50 nodes**:
+For a 4-year horizon (T=4), the model has **39 nodes**:
 
-| Stage | Type | Description | Nodes | Total Scenarios |
-|-------|------|-------------|-------|-----------------|
-| 1 | Investment | Initial (deterministic) | 1 | 1 |
-| 2 | Operational | Year 1 (deterministic) | 1 | 1 |
-| 3 | Investment | Carbon branching | 3 | 3 |
-| 4 | Operational | Energy branching | 9 | 3 × 3 = 9 |
-| 5 | Investment | - | 9 | 9 |
-| 6 | Operational | - | 9 | 27 |
-| 7 | Investment | - | 9 | 27 |
-| 8 | Operational | - | 9 | 81 |
+| Stage | Type | Description | Nodes | Scenario Paths |
+|-------|------|-------------|-------|----------------|
+| 1 | Investment | Initial (before temp branching) | 1 | 1 |
+| 2 | Operational | Temperature branching | 2 | 2 |
+| 3 | Investment | Energy branching | 6 | 6 |
+| 4 | Operational | Energy transitions | 6 | 18 |
+| 5 | Investment | - | 6 | 18 |
+| 6 | Operational | - | 6 | 54 |
+| 7 | Investment | - | 6 | 54 |
+| 8 | Operational | - | 6 | 162 |
 
-**Total unique paths**: 2,187 scenarios (considering demand uncertainty at operational stages)
+**Total unique paths**: ~486 scenarios (considering demand uncertainty at operational stages 4-8)
+
+**Key difference from standard SDDP**: System temperature branching occurs at stage 1, allowing the first investment decision to be temperature-aware. This "early branching" structure enables proactive adaptation to long-term DH network temperature regime scenarios.
 
 ### Key Features
 - **Vintage tracking**: Capacities tracked by investment year with retirement based on lifetime
@@ -399,15 +413,15 @@ For a 4-year horizon (T=4), the model has **50 nodes**:
 
 After making changes to parameters, verify your model is well-configured:
 
-1. **Check node count**: For T=4, should have 50 nodes
-   - Look for: `nodes : 50` in training output
+1. **Check node count**: For T=4, should have 39 nodes
+   - Look for: `nodes : 39` in training output
 
-2. **Check scenario count**: For T=4 with default settings, should have 2,187 scenarios
-   - Look for: `scenarios : 2.18700e+03` in training output
+2. **Check scenario count**: For T=4 with default settings, should have ~486 scenarios
+   - Look for: `scenarios : 4.86000e+02` in training output
 
 3. **Verify probabilities sum to 1.0**:
    - Each row in **EnergyTransitions** must sum to 1.0
-   - **CarbonProbabilities** must sum to 1.0
+   - **TemperatureProbabilities** probabilities must sum to 1.0
    - **DemandUncertainty** probabilities must sum to 1.0
 
 4. **Check for unmet demand**:
@@ -446,11 +460,11 @@ julia examples/run_capacity_expansion.jl
 ```
 **Check**: Does it complete? Are results reasonable?
 
-#### Phase 2: Sensitivity to Carbon Prices
+#### Phase 2: Sensitivity to System Temperature Scenarios
 ```
-1. Increase carbon prices by 50% in CarbonTrajectories
+1. Adjust COP multipliers in TemperatureScenarios (e.g., 1.15 low-temp, 0.85 high-temp)
 2. Re-run and compare investment decisions
-3. Expected: More investment in low-carbon technologies
+3. Expected: Wider temperature range → more flexible/robust capacity mix
 ```
 
 #### Phase 3: Sensitivity to Energy Price Volatility
@@ -463,7 +477,7 @@ julia examples/run_capacity_expansion.jl
 #### Phase 4: Longer Horizon
 ```
 1. Increase T from 4 to 6 in ModelConfig
-2. Extend CarbonTrajectories with year_5 and year_6
+2. Extend CarbonTrajectory with year_5 and year_6
 3. Re-run (expect longer solve time)
 4. Expected: More nuanced long-term investment strategy
 ```
