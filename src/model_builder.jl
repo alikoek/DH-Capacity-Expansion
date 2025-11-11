@@ -482,7 +482,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
 
                 # Apply temperature-dependent COP multiplier for heat pumps
-                if tech == :HeatPump
+                if occursin("HeatPump", string(tech))
                     efficiency_th_adjusted[tech] = base_eff * cop_multiplier
                 else
                     efficiency_th_adjusted[tech] = base_eff
