@@ -108,7 +108,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
     model = SDDP.MarkovianPolicyGraph(
         transition_matrices=transition_matrices,
         sense=:Min,
-        lower_bound=0.0,
+        lower_bound=-1e8,
         optimizer=Gurobi.Optimizer
     ) do sp, node
         t, markov_state = node
@@ -424,7 +424,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             end
 
             # Waste fuel availability constraint (annual limit on waste input)
-            if :Waste_CHP in params.technologies && params.waste_availability[model_year] < 1e5
+            if :Waste_CHP in params.technologies && params.waste_availability[model_year] > 0
                 waste_eff = efficiency_th_adjusted[:Waste_CHP]
                 @constraint(sp,
                     sum(data.week_weights_normalized[week] *
