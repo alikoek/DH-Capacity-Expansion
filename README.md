@@ -129,6 +129,9 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 - `scenario`: Scenario number (1-2)
 - `description`: Scenario description (Low-temp, High-temp)
 - `cop_multiplier`: COP multiplier for heat pumps (e.g., 1.1 for low-temp DH, 0.9 for high-temp DH)
+
+**TemperatureProbabilities**: Branching probabilities for temperature scenarios
+- `scenario`: Scenario number (1-2)
 - `probability`: Branching probability at stage 1 (must sum to 1.0)
 
 **DemandUncertainty**: Stage-wise independent demand multipliers
@@ -418,7 +421,7 @@ After making changes to parameters, verify your model is well-configured:
 
 3. **Verify probabilities sum to 1.0**:
    - Each row in **EnergyTransitions** must sum to 1.0
-   - **TemperatureScenarios** probabilities must sum to 1.0
+   - **TemperatureProbabilities** probabilities must sum to 1.0
    - **DemandUncertainty** probabilities must sum to 1.0
 
 4. **Check for unmet demand**:
