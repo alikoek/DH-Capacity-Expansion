@@ -214,8 +214,8 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
             # Add existing storage capacity from retirement schedule (consistent with technologies)
-            if haskey(params.storage_params, :initial_capacity_schedule)
-                storage_cap_next_stage += params.storage_params[:initial_capacity_schedule][next_model_year]
+            if haskey(params.storage_params, :existing_capacity_schedule)
+                storage_cap_next_stage += params.storage_params[:existing_capacity_schedule][next_model_year]
             else
                 # Fallback: assume initial capacity does not retire (documented assumption)
                 storage_cap_next_stage += params.storage_params[:initial_capacity]
@@ -277,8 +277,8 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                         end
                     end
                     # Add existing storage capacity from retirement schedule at future_year
-                    if haskey(params, :storage_existing_capacity_schedule)
-                        storage_cap_future += params.storage_existing_capacity_schedule[future_year]
+                    if haskey(params.storage_params, :existing_capacity_schedule)
+                        storage_cap_future += params.storage_params[:existing_capacity_schedule][future_year]
                     else
                         # Fallback: use initial capacity as constant (legacy behavior)
                         storage_cap_future += params.storage_params[:initial_capacity]
