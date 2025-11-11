@@ -297,8 +297,8 @@ function load_parameters(excel_path::String)
         end
     end
 
-    # Load CarbonTrajectories sheet
-    carbon_traj_sheet = xf["CarbonTrajectories"]
+    # Load CarbonTrajectory sheet
+    carbon_traj_sheet = xf["CarbonTrajectory"]
     carbon_traj_df = DataFrame(XLSX.gettable(carbon_traj_sheet))
 
     # Helper function to find column starting with base name (handles brackets)
