@@ -213,8 +213,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     storage_cap_next_stage += cap_vintage_stor[stage].out
                 end
             end
-            # Add existing storage capacity (assuming it follows same retirement pattern)
-            storage_cap_next_stage += params.storage_params[:initial_capacity]  # Placeholder - adjust if needed
+            # Add existing storage capacity from retirement schedule (consistent with technologies)
+            if haskey(params.storage_params, :initial_capacity_schedule)
+                storage_cap_next_stage += params.storage_params[:initial_capacity_schedule][next_model_year]
+            else
+                # Fallback: assume initial capacity does not retire (documented assumption)
+                storage_cap_next_stage += params.storage_params[:initial_capacity]
+            end
 
             # Multi-year look-ahead capacity limit constraints
             # Apply constraints for ALL future years, not just next year
@@ -271,8 +276,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                             end
                         end
                     end
-                    # Add existing storage capacity (placeholder)
-                    storage_cap_future += params.storage_params[:initial_capacity]
+                    # Add existing storage capacity from retirement schedule at future_year
+                    if haskey(params, :storage_existing_capacity_schedule)
+                        storage_cap_future += params.storage_existing_capacity_schedule[future_year]
+                    else
+                        # Fallback: use initial capacity as constant (legacy behavior)
+                        storage_cap_future += params.storage_params[:initial_capacity]
+                    end
 
                     # Storage capacity limit constraint for future_year
                     storage_limit = params.storage_capacity_limits[future_year]
@@ -352,8 +362,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     storage_cap += cap_vintage_stor[stage].in
                 end
             end
-            # Add existing storage
-            storage_cap += params.storage_params[:initial_capacity]
+            # Add existing storage from retirement schedule
+            if haskey(params.storage_params, :existing_capacity_schedule)
+                storage_cap += params.storage_params[:existing_capacity_schedule][model_year]
+            else
+                # Fallback to constant for backward compatibility
+                storage_cap += params.storage_params[:initial_capacity]
+            end
 
             # Demand balance constraints (deterministic demand = base_annual_demand)
             # Form: production + discharge - charge + unmet = base_demand
