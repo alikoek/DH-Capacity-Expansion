@@ -423,18 +423,6 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 @constraint(sp, u_level[week, data.hours_per_week] <= 0.01 * storage_cap)
             end
 
-            # Waste fuel availability constraint (annual limit on waste input)
-            if :Waste_CHP in params.technologies && params.waste_availability[model_year] > 0
-                waste_eff = efficiency_th_adjusted[:Waste_CHP]
-                @constraint(sp,
-                    sum(data.week_weights_normalized[week] *
-                        sum(u_production[:Waste_CHP, week, hour] / waste_eff
-                            for hour in 1:data.hours_per_week)
-                        for week in 1:data.n_weeks)
-                    <= params.waste_availability[model_year]
-                )
-            end
-
             # State updates for capacity vintages (deterministic - same for all demand realizations)
             for stage in vintage_stages
                 @constraint(sp, [tech in params.technologies],
@@ -502,6 +490,18 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 else
                     efficiency_th_adjusted[tech] = base_eff
                 end
+            end
+
+            # Waste fuel availability constraint (annual limit on waste input)
+            if :Waste_CHP in params.technologies && params.waste_availability[model_year] > 0
+                waste_eff = efficiency_th_adjusted[:Waste_CHP]
+                @constraint(sp,
+                    sum(data.week_weights_normalized[week] *
+                        sum(u_production[:Waste_CHP, week, hour] / waste_eff
+                            for hour in 1:data.hours_per_week)
+                        for week in 1:data.n_weeks)
+                    <= params.waste_availability[model_year]
+                )
             end
 
             local expr_annual_cost = 0.0
