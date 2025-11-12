@@ -112,12 +112,11 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
 
             # Calculate energy mix (share of total production) AFTER loop completes
             # This ensures all technologies use the same total_production denominator
+            # Always push energy share (including zeros) to reflect overall contribution
             if total_production > 0.001
                 for tech in params.technologies
-                    if tech_productions[tech] > 0.001
-                        energy_share = tech_productions[tech] / total_production
-                        push!(energy_mix_by_tech[tech], energy_share)
-                    end
+                    energy_share = tech_productions[tech] / total_production
+                    push!(energy_mix_by_tech[tech], energy_share)
                 end
             end
 
