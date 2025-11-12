@@ -43,6 +43,7 @@ export build_sddp_model
 export run_simulation, export_results, print_summary_statistics
 export calculate_performance_metrics, export_performance_metrics
 export generate_visualizations
+export decode_markov_state
 
 # Include all module files
 include("parameters.jl")

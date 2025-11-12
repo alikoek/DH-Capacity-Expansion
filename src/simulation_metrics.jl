@@ -5,31 +5,6 @@ Performance metrics calculation for simulation results
 using Statistics
 
 """
-    evolve_energy_probabilities(initial_dist, transitions)
-
-Evolve energy state probabilities through Markov transitions for operational stages.
-Matches SDDP graph structure: p_t = p_{t-2} × energy_transitions for t ∈ {4,6,8}.
-
-# Arguments
-- `initial_dist::Vector{Float64}`: Initial energy state distribution (for stage 2)
-- `transitions::Matrix{Float64}`: 3×3 Markov transition matrix
-
-# Returns
-Dictionary mapping stage number → probability vector for operational stages {2,4,6,8}
-"""
-function evolve_energy_probabilities(initial_dist::Vector{Float64}, transitions::Matrix{Float64})
-    probs = Dict{Int, Vector{Float64}}()
-    probs[2] = copy(initial_dist)
-
-    # Evolve probabilities for subsequent operational stages
-    for t in [4, 6, 8]
-        probs[t] = vec(probs[t-2]' * transitions)  # vec() converts Adjoint to Vector
-    end
-
-    return probs
-end
-
-"""
     calculate_performance_metrics(simulations, params::ModelParameters, data::ProcessedData)
 
 Calculate performance metrics across all simulations.
@@ -54,10 +29,6 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
         lcoh_by_tech[tech] = Float64[]
     end
 
-    # Evolve energy state probabilities through Markov transitions
-    # This ensures LCOH calculations use stage-specific probabilities (not just initial distribution)
-    energy_probs = evolve_energy_probabilities(params.initial_energy_dist, params.energy_transitions)
-
     # Process each simulation
     for sim in 1:n_sims
         # Collect data for each year (operational stages)
@@ -81,6 +52,8 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
             total_production = 0.0
             tech_productions = Dict{Symbol, Float64}()
             tech_capacities = Dict{Symbol, Float64}()
+            tech_new_capacities = Dict{Symbol, Float64}()
+            tech_existing_capacities = Dict{Symbol, Float64}()
 
             for tech in params.technologies
                 # Calculate annual production
@@ -94,11 +67,13 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
 
                 # Get installed capacity (alive capacity from previous investment stage)
                 inv_stage = 2 * year - 1
+                new_cap = 0.0
+                existing_cap = 0.0
+
                 if inv_stage >= 1 && inv_stage <= length(simulations[sim])
                     sp_inv = simulations[sim][inv_stage]
-                    alive_cap = 0.0
 
-                    # Sum up alive vintage capacities
+                    # Sum up alive NEW vintage capacities
                     for stage in params.investment_stages
                         vintage_symbol = Symbol("cap_vintage_tech_$(stage)")
                         if haskey(sp_inv, vintage_symbol)
@@ -106,89 +81,104 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                             if isa(vintage_data, Dict) && haskey(vintage_data, tech)
                                 vintage_cap = vintage_data[tech]
                                 # Check if vintage is alive at operational stage
-                                lifetime_dict = (stage == 0) ? params.c_lifetime_initial : params.c_lifetime_new
-                                if is_alive(stage, op_stage, lifetime_dict, tech)
-                                    alive_cap += vintage_cap
+                                if is_alive(stage, op_stage, params.c_lifetime_new, tech)
+                                    new_cap += vintage_cap
                                 end
                             end
                         end
                     end
 
-                    tech_capacities[tech] = alive_cap
-
-                    # Calculate Full Load Hours (FLH)
-                    if alive_cap > 0.001
-                        flh = tech_production / alive_cap
-                        push!(flh_by_tech[tech], flh)
-
-                        # Calculate Capacity Factor
-                        cf = flh / 8760.0  # 8760 hours per year
-                        push!(capacity_factor_by_tech[tech], cf)
+                    # Add existing capacity from retirement schedule
+                    if haskey(params.c_existing_capacity_schedule, tech)
+                        existing_cap = params.c_existing_capacity_schedule[tech][year]
                     end
                 end
 
-                # Calculate energy mix (share of total production)
-                if total_production > 0.001
-                    energy_share = tech_production / total_production
-                    push!(energy_mix_by_tech[tech], energy_share)
+                total_cap = new_cap + existing_cap
+                tech_capacities[tech] = total_cap
+                tech_new_capacities[tech] = new_cap
+                tech_existing_capacities[tech] = existing_cap
+
+                # Calculate Full Load Hours (FLH)
+                if total_cap > 0.001
+                    flh = tech_production / total_cap
+                    push!(flh_by_tech[tech], flh)
+
+                    # Calculate Capacity Factor
+                    cf = flh / 8760.0  # 8760 hours per year
+                    push!(capacity_factor_by_tech[tech], cf)
                 end
             end
 
-            # Calculate LCOH by technology
+            # Calculate energy mix (share of total production) AFTER loop completes
+            # This ensures all technologies use the same total_production denominator
+            if total_production > 0.001
+                for tech in params.technologies
+                    if tech_productions[tech] > 0.001
+                        energy_share = tech_productions[tech] / total_production
+                        push!(energy_mix_by_tech[tech], energy_share)
+                    end
+                end
+            end
+
+            # Calculate LCOH by technology using ACTUAL simulation path
             model_year = year  # Model year corresponds to current year
+
+            # Get actual realized state from this simulation path
+            t_sim, markov_state = sp[:node_index]
+            energy_state, temp_scenario = decode_markov_state(t_sim, markov_state)
+
             for tech in params.technologies
-                if tech_productions[tech] > 0.001 && tech_capacities[tech] > 0.001
+                if tech_productions[tech] > 0.001
+                    # Get capacities for this technology
+                    new_cap = tech_new_capacities[tech]
+                    total_cap = tech_capacities[tech]
+
                     # Annualized CAPEX (using capital recovery factor)
+                    # Only apply to NEW capacity (existing capacity already paid for)
                     crf = params.discount_rate * (1 + params.discount_rate)^params.c_lifetime_new[tech] /
                           ((1 + params.discount_rate)^params.c_lifetime_new[tech] - 1)
+                    annual_capex = params.c_investment_cost[tech] * new_cap * crf  # Already TSEK/MW
 
-                    annual_capex = params.c_investment_cost[tech] * tech_capacities[tech] * crf * 1000  # Convert MSEK to TSEK
-
-                    # Annual fixed O&M
-                    annual_fixed_om = params.c_opex_fixed[tech] * tech_capacities[tech] * 1000  # Convert MSEK to TSEK
+                    # Annual fixed O&M - apply to TOTAL capacity (new + existing)
+                    annual_fixed_om = params.c_opex_fixed[tech] * total_cap  # Already TSEK/MW
 
                     # Variable O&M
-                    annual_var_om = params.c_opex_var[tech] * tech_productions[tech] / 1000  # Convert SEK to TSEK
+                    annual_var_om = params.c_opex_var[tech] * tech_productions[tech]  # Already TSEK/MWh
 
-                    # Fuel costs (energy carrier + carbon costs - electricity sales)
+                    # Get efficiency based on technology type and ACTUAL temperature scenario
                     carrier = params.c_energy_carrier[tech]
-                    # Use time-varying efficiency for Waste_CHP
                     if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
+                        # Time-varying efficiency for Waste_CHP
                         efficiency_th = params.waste_chp_efficiency_schedule[model_year]
+                    elseif occursin("HeatPump", string(tech))
+                        # Use ACTUAL COP multiplier from realized temperature scenario
+                        cop_mult = params.temp_cop_multipliers[params.temp_scenarios[temp_scenario]]
+                        efficiency_th = params.c_efficiency_th[tech] * cop_mult
                     else
                         efficiency_th = params.c_efficiency_th[tech]
                     end
                     efficiency_el = params.c_efficiency_el[tech]
 
-                    # Calculate average energy prices across scenarios (weighted by stage-evolved probabilities)
-                    avg_carrier_price = 0.0
-                    n_energy_states = size(params.energy_transitions, 1)
-
-                    if carrier == :elec
-                        # Electricity has time-varying hourly prices
-                        if haskey(data.purch_elec_prices, model_year)
-                            for energy_state in 1:n_energy_states
-                                state_prob = energy_probs[op_stage][energy_state]
-                                scenario_symbol = [:high, :medium, :low][energy_state]
-                                elec_prices = data.purch_elec_prices[model_year][scenario_symbol]
-                                avg_carrier_price += state_prob * mean(elec_prices)
-                            end
-                        end
-                    else
-                        # Other carriers have fixed prices in energy_price_map
-                        for energy_state in 1:n_energy_states
-                            state_prob = energy_probs[op_stage][energy_state]
-                            carrier_price = params.energy_price_map[energy_state][model_year][carrier]
-                            avg_carrier_price += state_prob * carrier_price
-                        end
-                    end
-
                     # Energy consumption
                     energy_consumption = tech_productions[tech] / efficiency_th  # MWh of fuel
 
+                    # Get ACTUAL carrier price from realized energy state (not averaged)
+                    if carrier == :elec
+                        # Use actual electricity price from realized energy state
+                        scenario_symbol = [:high, :medium, :low][energy_state]
+                        elec_prices = data.purch_elec_prices[model_year][scenario_symbol]
+                        avg_carrier_price = mean(elec_prices)  # Average over hours only
+                    else
+                        # Use actual carrier price from realized energy state
+                        avg_carrier_price = params.energy_price_map[energy_state][model_year][carrier]
+                    end
+
+                    # Fuel purchase cost
+                    fuel_cost = avg_carrier_price * energy_consumption  # Already TSEK
+
                     # Carbon costs
-                    carbon_price = params.carbon_trajectory[model_year]
-                    # Get emission factor (time-varying for electricity, static for others)
+                    carbon_price = params.carbon_trajectory[model_year]  # Already TSEK
                     if carrier == :elec
                         emission_factor = params.elec_emission_factors[model_year]
                     else
@@ -196,21 +186,14 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     end
                     carbon_cost = carbon_price * emission_factor * energy_consumption  # TSEK
 
-                    # Fuel purchase cost
-                    fuel_cost = avg_carrier_price * energy_consumption / 1000  # Convert SEK to TSEK
-
-                    # Electricity sales revenue (for CHP)
-                    # Use average electricity sale price across scenarios (stage-evolved probabilities)
-                    avg_elec_sale_price = 0.0
+                    # Electricity sales revenue (for CHP) - use ACTUAL sale prices
+                    elec_revenue = 0.0
                     if haskey(data.sale_elec_prices, model_year)
-                        for energy_state in 1:n_energy_states
-                            state_prob = energy_probs[op_stage][energy_state]
-                            scenario_symbol = [:high, :medium, :low][energy_state]
-                            elec_prices = data.sale_elec_prices[model_year][scenario_symbol]
-                            avg_elec_sale_price += state_prob * mean(elec_prices)
-                        end
+                        scenario_symbol = [:high, :medium, :low][energy_state]
+                        sale_prices = data.sale_elec_prices[model_year][scenario_symbol]
+                        avg_sale_price = mean(sale_prices)
+                        elec_revenue = efficiency_el * avg_sale_price * energy_consumption  # Already TSEK
                     end
-                    elec_revenue = efficiency_el * avg_elec_sale_price * energy_consumption / 1000  # TSEK
 
                     # Total annual cost
                     total_annual_cost = annual_capex + annual_fixed_om + annual_var_om + fuel_cost + carbon_cost - elec_revenue
