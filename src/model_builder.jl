@@ -91,24 +91,12 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         temp_probs
     )
 
-    # Helper function to decode markov state into (energy_state, temp_scenario)
-    function decode_markov_state(t::Int, markov_state::Int)
-        if t == 1
-            # Stage 1: System temperature branching only (2 nodes)
-            return 1, markov_state  # energy_state=1 (default), temp_scenario∈{1,2}
-        else
-            # Stages 2+: 6 states representing (energy, temp) combinations
-            # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
-            temp_scenario = div(markov_state - 1, 3) + 1
-            energy_state = mod(markov_state - 1, 3) + 1
-            return energy_state, temp_scenario
-        end
-    end
+    # Note: decode_markov_state is now defined in helper_functions.jl
 
     model = SDDP.MarkovianPolicyGraph(
         transition_matrices=transition_matrices,
         sense=:Min,
-        lower_bound=0.0,
+        lower_bound=-1e8,
         optimizer=Gurobi.Optimizer
     ) do sp, node
         t, markov_state = node
@@ -213,8 +201,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     storage_cap_next_stage += cap_vintage_stor[stage].out
                 end
             end
-            # Add existing storage capacity (assuming it follows same retirement pattern)
-            storage_cap_next_stage += params.storage_params[:initial_capacity]  # Placeholder - adjust if needed
+            # Add existing storage capacity from retirement schedule (consistent with technologies)
+            if haskey(params.storage_params, :existing_capacity_schedule)
+                storage_cap_next_stage += params.storage_params[:existing_capacity_schedule][next_model_year]
+            else
+                # Fallback: assume initial capacity does not retire (documented assumption)
+                storage_cap_next_stage += params.storage_params[:initial_capacity]
+            end
 
             # Multi-year look-ahead capacity limit constraints
             # Apply constraints for ALL future years, not just next year
@@ -271,8 +264,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                             end
                         end
                     end
-                    # Add existing storage capacity (placeholder)
-                    storage_cap_future += params.storage_params[:initial_capacity]
+                    # Add existing storage capacity from retirement schedule at future_year
+                    if haskey(params.storage_params, :existing_capacity_schedule)
+                        storage_cap_future += params.storage_params[:existing_capacity_schedule][future_year]
+                    else
+                        # Fallback: use initial capacity as constant (legacy behavior)
+                        storage_cap_future += params.storage_params[:initial_capacity]
+                    end
 
                     # Storage capacity limit constraint for future_year
                     storage_limit = params.storage_capacity_limits[future_year]
@@ -352,8 +350,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     storage_cap += cap_vintage_stor[stage].in
                 end
             end
-            # Add existing storage
-            storage_cap += params.storage_params[:initial_capacity]
+            # Add existing storage from retirement schedule
+            if haskey(params.storage_params, :existing_capacity_schedule)
+                storage_cap += params.storage_params[:existing_capacity_schedule][model_year]
+            else
+                # Fallback to constant for backward compatibility
+                storage_cap += params.storage_params[:initial_capacity]
+            end
 
             # Demand balance constraints (deterministic demand = base_annual_demand)
             # Form: production + discharge - charge + unmet = base_demand
@@ -406,18 +409,6 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
                 # End-of-week constraint: storage must be nearly empty
                 @constraint(sp, u_level[week, data.hours_per_week] <= 0.01 * storage_cap)
-            end
-
-            # Waste fuel availability constraint (annual limit on waste input)
-            if :Waste_CHP in params.technologies && params.waste_availability[model_year] < 1e5
-                waste_eff = efficiency_th_adjusted[:Waste_CHP]
-                @constraint(sp,
-                    sum(data.week_weights_normalized[week] *
-                        sum(u_production[:Waste_CHP, week, hour] / waste_eff
-                            for hour in 1:data.hours_per_week)
-                        for week in 1:data.n_weeks)
-                    <= params.waste_availability[model_year]
-                )
             end
 
             # State updates for capacity vintages (deterministic - same for all demand realizations)
@@ -482,11 +473,23 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
 
                 # Apply temperature-dependent COP multiplier for heat pumps
-                if tech == :HeatPump
+                if occursin("HeatPump", string(tech))
                     efficiency_th_adjusted[tech] = base_eff * cop_multiplier
                 else
                     efficiency_th_adjusted[tech] = base_eff
                 end
+            end
+
+            # Waste fuel availability constraint (annual limit on waste input)
+            if :Waste_CHP in params.technologies && params.waste_availability[model_year] > 0
+                waste_eff = efficiency_th_adjusted[:Waste_CHP]
+                @constraint(sp,
+                    sum(data.week_weights_normalized[week] *
+                        sum(u_production[:Waste_CHP, week, hour] / waste_eff
+                            for hour in 1:data.hours_per_week)
+                        for week in 1:data.n_weeks)
+                    <= params.waste_availability[model_year]
+                )
             end
 
             local expr_annual_cost = 0.0
