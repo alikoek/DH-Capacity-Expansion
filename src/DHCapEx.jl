@@ -33,12 +33,17 @@ print_summary_statistics(simulations, params, data)
 """
 module DHCapEx
 
+# Import SDDP at module level so SDDP.JuMP is available to submodules
+using SDDP
+
 # Export main functions and types
 export load_parameters, ModelParameters
 export load_all_data, ProcessedData
 export build_sddp_model
 export run_simulation, export_results, print_summary_statistics
+export calculate_performance_metrics, export_performance_metrics
 export generate_visualizations
+export decode_markov_state
 
 # Include all module files
 include("parameters.jl")
@@ -46,6 +51,7 @@ include("data_processing.jl")
 include("helper_functions.jl")
 include("model_builder.jl")
 include("simulation.jl")
+include("simulation_metrics.jl")
 include("visualization.jl")
 
 end # module DHCapEx

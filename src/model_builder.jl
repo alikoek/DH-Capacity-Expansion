@@ -91,19 +91,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         temp_probs
     )
 
-    # Helper function to decode markov state into (energy_state, temp_scenario)
-    function decode_markov_state(t::Int, markov_state::Int)
-        if t == 1
-            # Stage 1: System temperature branching only (2 nodes)
-            return 1, markov_state  # energy_state=1 (default), temp_scenario∈{1,2}
-        else
-            # Stages 2+: 6 states representing (energy, temp) combinations
-            # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
-            temp_scenario = div(markov_state - 1, 3) + 1
-            energy_state = mod(markov_state - 1, 3) + 1
-            return energy_state, temp_scenario
-        end
-    end
+    # Note: decode_markov_state is now defined in helper_functions.jl
 
     model = SDDP.MarkovianPolicyGraph(
         transition_matrices=transition_matrices,
