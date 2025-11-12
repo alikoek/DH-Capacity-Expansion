@@ -16,10 +16,10 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
     n_years = params.T
 
     # Initialize storage for metrics across simulations
-    flh_by_tech = Dict{Symbol, Vector{Float64}}()
-    capacity_factor_by_tech = Dict{Symbol, Vector{Float64}}()
-    energy_mix_by_tech = Dict{Symbol, Vector{Float64}}()
-    lcoh_by_tech = Dict{Symbol, Vector{Float64}}()
+    flh_by_tech = Dict{Symbol,Vector{Float64}}()
+    capacity_factor_by_tech = Dict{Symbol,Vector{Float64}}()
+    energy_mix_by_tech = Dict{Symbol,Vector{Float64}}()
+    lcoh_by_tech = Dict{Symbol,Vector{Float64}}()
     system_lcoh = Float64[]
 
     for tech in params.technologies
@@ -50,10 +50,10 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
 
             # Calculate production and installed capacity for each technology
             total_production = 0.0
-            tech_productions = Dict{Symbol, Float64}()
-            tech_capacities = Dict{Symbol, Float64}()
-            tech_new_capacities = Dict{Symbol, Float64}()
-            tech_existing_capacities = Dict{Symbol, Float64}()
+            tech_productions = Dict{Symbol,Float64}()
+            tech_capacities = Dict{Symbol,Float64}()
+            tech_new_capacities = Dict{Symbol,Float64}()
+            tech_existing_capacities = Dict{Symbol,Float64}()
 
             for tech in params.technologies
                 # Calculate annual production
@@ -146,13 +146,13 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     # Variable O&M
                     annual_var_om = params.c_opex_var[tech] * tech_productions[tech]  # Already TSEK/MWh
 
-                    # Get efficiency based on technology type and ACTUAL temperature scenario
+                    # Get efficiency based on technology type and temperature scenario
                     carrier = params.c_energy_carrier[tech]
                     if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
                         # Time-varying efficiency for Waste_CHP
                         efficiency_th = params.waste_chp_efficiency_schedule[model_year]
                     elseif occursin("HeatPump", string(tech))
-                        # Use ACTUAL COP multiplier from realized temperature scenario
+                        # Use COP multiplier from realized temperature scenario
                         cop_mult = params.temp_cop_multipliers[params.temp_scenarios[temp_scenario]]
                         efficiency_th = params.c_efficiency_th[tech] * cop_mult
                     else
@@ -163,19 +163,29 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     # Energy consumption
                     energy_consumption = tech_productions[tech] / efficiency_th  # MWh of fuel
 
-                    # Get ACTUAL carrier price from realized energy state (not averaged)
+                    # Calculate fuel cost using prices from realized energy state
                     if carrier == :elec
-                        # Use actual electricity price from realized energy state
+                        # Production-weighted electricity price (exact, not approximation)
                         scenario_symbol = [:high, :medium, :low][energy_state]
                         elec_prices = data.purch_elec_prices[model_year][scenario_symbol]
-                        avg_carrier_price = mean(elec_prices)  # Average over hours only
+
+                        # Calculate weighted average: sum(production × price) / sum(production)
+                        weighted_cost = 0.0
+                        for week in 1:data.n_weeks
+                            for hour in 1:data.hours_per_week
+                                prod_hour = value(sp[:u_production][tech, week, hour])
+                                price_hour = elec_prices[week, hour]
+                                weighted_cost += prod_hour * price_hour * data.week_weights_normalized[week]
+                            end
+                        end
+                        carrier_price = weighted_cost / tech_productions[tech]  # TSEK/MWh
                     else
-                        # Use actual carrier price from realized energy state
-                        avg_carrier_price = params.energy_price_map[energy_state][model_year][carrier]
+                        # Non-electricity carriers: single price from realized energy state
+                        carrier_price = params.energy_price_map[energy_state][model_year][carrier]
                     end
 
                     # Fuel purchase cost
-                    fuel_cost = avg_carrier_price * energy_consumption  # Already TSEK
+                    fuel_cost = carrier_price * energy_consumption  # Already TSEK
 
                     # Carbon costs
                     carbon_price = params.carbon_trajectory[model_year]  # Already TSEK
@@ -186,13 +196,23 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     end
                     carbon_cost = carbon_price * emission_factor * energy_consumption  # TSEK
 
-                    # Electricity sales revenue (for CHP) - use ACTUAL sale prices
+                    # Electricity sales revenue (for CHP) - production-weighted sale price
                     elec_revenue = 0.0
-                    if haskey(data.sale_elec_prices, model_year)
+                    if efficiency_el > 0.0 && haskey(data.sale_elec_prices, model_year)
                         scenario_symbol = [:high, :medium, :low][energy_state]
                         sale_prices = data.sale_elec_prices[model_year][scenario_symbol]
-                        avg_sale_price = mean(sale_prices)
-                        elec_revenue = efficiency_el * avg_sale_price * energy_consumption  # Already TSEK
+
+                        # Calculate production-weighted average sale price
+                        weighted_revenue = 0.0
+                        for week in 1:data.n_weeks
+                            for hour in 1:data.hours_per_week
+                                prod_hour = value(sp[:u_production][tech, week, hour])
+                                price_hour = sale_prices[week, hour]
+                                weighted_revenue += prod_hour * price_hour * data.week_weights_normalized[week]
+                            end
+                        end
+                        sale_price = weighted_revenue / tech_productions[tech]  # TSEK/MWh
+                        elec_revenue = efficiency_el * sale_price * energy_consumption  # Already TSEK
                     end
 
                     # Total annual cost
@@ -223,10 +243,10 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
     end
 
     # Aggregate statistics
-    metrics = Dict{String, Any}()
+    metrics = Dict{String,Any}()
 
     # Full Load Hours statistics
-    metrics["FLH"] = Dict{Symbol, Dict{String, Float64}}()
+    metrics["FLH"] = Dict{Symbol,Dict{String,Float64}}()
     for tech in params.technologies
         if !isempty(flh_by_tech[tech])
             metrics["FLH"][tech] = Dict(
@@ -240,7 +260,7 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
     end
 
     # Capacity Factor statistics
-    metrics["Capacity_Factor"] = Dict{Symbol, Dict{String, Float64}}()
+    metrics["Capacity_Factor"] = Dict{Symbol,Dict{String,Float64}}()
     for tech in params.technologies
         if !isempty(capacity_factor_by_tech[tech])
             metrics["Capacity_Factor"][tech] = Dict(
@@ -254,7 +274,7 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
     end
 
     # Energy Mix statistics
-    metrics["Energy_Mix"] = Dict{Symbol, Dict{String, Float64}}()
+    metrics["Energy_Mix"] = Dict{Symbol,Dict{String,Float64}}()
     for tech in params.technologies
         if !isempty(energy_mix_by_tech[tech])
             metrics["Energy_Mix"][tech] = Dict(
@@ -266,7 +286,7 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
     end
 
     # LCOH statistics
-    metrics["LCOH_by_Tech"] = Dict{Symbol, Dict{String, Float64}}()
+    metrics["LCOH_by_Tech"] = Dict{Symbol,Dict{String,Float64}}()
     for tech in params.technologies
         if !isempty(lcoh_by_tech[tech])
             metrics["LCOH_by_Tech"][tech] = Dict(
