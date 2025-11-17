@@ -65,23 +65,6 @@ mkpath(output_dir)
 ##############################################################################
 
 """
-Calculate risk metrics for a cost distribution
-"""
-function calculate_risk_metrics(costs::Vector{Float64})
-    metrics = Dict{String,Float64}()
-    metrics["mean"] = mean(costs)
-    metrics["std"] = std(costs)
-    metrics["min"] = minimum(costs)
-    metrics["max"] = maximum(costs)
-
-    for α in RISK_LEVELS
-        metrics["cvar_$(Int(100α))"] = quantile(costs, α)
-    end
-
-    return metrics
-end
-
-"""
 Extract solution characteristics (technology mix, timing, etc.)
 """
 function extract_solution_characteristics(simulations, params, data)
