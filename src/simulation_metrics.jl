@@ -157,7 +157,15 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     else
                         efficiency_th = params.c_efficiency_th[tech]
                     end
-                    efficiency_el = params.c_efficiency_el[tech]
+
+                    # Electrical efficiency (maintain constant power-to-heat ratio for Waste_CHP)
+                    if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
+                        # Calculate base power-to-heat ratio and apply to time-varying thermal efficiency
+                        α_waste_chp = params.c_efficiency_el[tech] / params.c_efficiency_th[tech]
+                        efficiency_el = α_waste_chp * efficiency_th
+                    else
+                        efficiency_el = params.c_efficiency_el[tech]
+                    end
 
                     # Energy consumption
                     energy_consumption = tech_productions[tech] / efficiency_th  # MWh of fuel

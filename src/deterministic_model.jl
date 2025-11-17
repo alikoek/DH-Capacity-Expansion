@@ -310,6 +310,24 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
+            # Calculate base power-to-heat ratio for Waste_CHP (constant)
+            if :Waste_CHP in params.technologies
+                α_waste_chp = params.c_efficiency_el[:Waste_CHP] / params.c_efficiency_th[:Waste_CHP]
+            else
+                α_waste_chp = 0.0
+            end
+
+            # Create adjusted electrical efficiencies (maintains constant power-to-heat ratio for Waste_CHP)
+            efficiency_el_adjusted = Dict{Symbol,Float64}()
+            for tech in params.technologies
+                if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
+                    # Adjust electrical efficiency to maintain constant power-to-heat ratio
+                    efficiency_el_adjusted[tech] = α_waste_chp * efficiency_th_adjusted[tech]
+                else
+                    efficiency_el_adjusted[tech] = params.c_efficiency_el[tech]
+                end
+            end
+
             # Operational variables
             u_production = @variable(model, [tech in params.technologies,
                     week = 1:data.n_weeks,
@@ -468,7 +486,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                         tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
                                     (fuel_cost + carbon_price * emission_factor) *
                                     (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
-                                    params.c_efficiency_el[tech] * expected_sale_elec[week, hour] *
+                                    efficiency_el_adjusted[tech] * expected_sale_elec[week, hour] *
                                     (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
                         week_cost += tech_cost
                     end

@@ -495,6 +495,24 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 end
             end
 
+            # Calculate base power-to-heat ratio for Waste_CHP (constant)
+            if :Waste_CHP in params.technologies
+                α_waste_chp = params.c_efficiency_el[:Waste_CHP] / params.c_efficiency_th[:Waste_CHP]
+            else
+                α_waste_chp = 0.0
+            end
+
+            # Create adjusted electrical efficiencies (maintains constant power-to-heat ratio for Waste_CHP)
+            efficiency_el_adjusted = Dict{Symbol, Float64}()
+            for tech in params.technologies
+                if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
+                    # Adjust electrical efficiency to maintain constant power-to-heat ratio
+                    efficiency_el_adjusted[tech] = α_waste_chp * efficiency_th_adjusted[tech]
+                else
+                    efficiency_el_adjusted[tech] = params.c_efficiency_el[tech]
+                end
+            end
+
             # Waste fuel availability constraint (annual limit on waste input)
             if :Waste_CHP in params.technologies && params.waste_availability[model_year] > 0
                 waste_eff = efficiency_th_adjusted[:Waste_CHP]
@@ -568,7 +586,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                             tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
                                         (fuel_cost + carbon_price * emission_factor) *
                                         (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
-                                        params.c_efficiency_el[tech] * sale_elec_price[week, hour] * ω.elec_price_mult *
+                                        efficiency_el_adjusted[tech] * sale_elec_price[week, hour] * ω.elec_price_mult *
                                         (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
                             week_cost += tech_cost
                         end
