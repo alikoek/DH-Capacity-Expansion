@@ -529,19 +529,22 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             # Determine scenarios based on Excel configuration
             extreme_stage = params.apply_to_year * 2  # Convert model year to stage
             if params.enable_extreme_events && t == extreme_stage && params.extreme_events !== nothing
-                # Use 4 scenarios from ExtremeEvents sheet
+                # Use scenarios from ExtremeEvents sheet
                 Ω_extreme = [(demand_mult = row.demand_multiplier,
                              elec_price_mult = row.elec_price_multiplier,
-                             dc_avail = row.dc_availability,
-                             prob = row.probability)
+                             dc_avail = row.dc_availability)
                             for row in eachrow(params.extreme_events)]
+                # Extract probabilities separately (CRITICAL: must be passed as second argument)
+                probabilities_extreme = [row.probability for row in eachrow(params.extreme_events)]
             else
                 # Default: single scenario with no multipliers
-                Ω_extreme = [(demand_mult = 1.0, elec_price_mult = 1.0, dc_avail = 1.0, prob = 1.0)]
+                Ω_extreme = [(demand_mult = 1.0, elec_price_mult = 1.0, dc_avail = 1.0)]
+                probabilities_extreme = [1.0]
             end
 
             # Parameterize: modify constraint RHS/coefficients and set objective
-            SDDP.parameterize(sp, Ω_extreme) do ω
+            # CRITICAL FIX: Pass probabilities as second argument to use configured probabilities
+            SDDP.parameterize(sp, Ω_extreme, probabilities_extreme) do ω
                 # 1. Modify demand balance RHS for each constraint
                 for week in 1:data.n_weeks, hour in 1:data.hours_per_week
                     JuMP.set_normalized_rhs(
