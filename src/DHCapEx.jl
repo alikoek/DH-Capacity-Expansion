@@ -20,6 +20,15 @@ systems using Stochastic Dual Dynamic Programming (SDDP).
 - `extract_ev_investments(ev_model, ev_variables, params)`: Extract EV investment decisions
 - `evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios)`: Evaluate EV policy under uncertainty
 
+# Results I/O Functions
+- `save_simulation_results(simulations, params, data, filepath)`: Save results to disk
+- `save_simulation_results_auto(simulations, params, data)`: Save with auto-generated timestamp
+- `load_simulation_results(filepath)`: Load previously saved results
+- `list_saved_results(directory)`: List all saved result files
+- `extract_extreme_events_info(simulations, params)`: Extract extreme event occurrences
+- `get_simulation_costs(simulations)`: Extract total costs from simulations
+- `filter_simulations_by_extreme_event(...)`: Filter simulations by extreme event type
+
 # Example Usage
 ```julia
 using DHCapEx
@@ -60,6 +69,12 @@ export decode_markov_state
 export build_deterministic_model
 export extract_ev_investments, evaluate_ev_policy
 
+# Export results I/O functions
+export save_simulation_results, save_simulation_results_auto
+export load_simulation_results, list_saved_results
+export extract_extreme_events_info, get_simulation_costs
+export filter_simulations_by_extreme_event
+
 # Include all module files
 include("parameters.jl")
 include("data_processing.jl")
@@ -72,5 +87,8 @@ include("visualization.jl")
 # VSS analysis modules
 include("deterministic_model.jl")
 include("ev_policy_evaluation.jl")
+
+# Results I/O module
+include("results_io.jl")
 
 end # module DHCapEx
