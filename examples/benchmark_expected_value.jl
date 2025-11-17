@@ -21,6 +21,7 @@ using SDDP  # Already imported by DHCapEx, but needed for SDDP-specific function
 using Statistics
 using Plots
 using StatsPlots
+using Dates
 
 println("="^70)
 println("BENCHMARK: SDDP vs Expected-Value Deterministic Model")
@@ -347,10 +348,23 @@ savefig(combined, output_plot)
 println("✓ Comparison plot saved to: $output_plot")
 
 # ============================================================================
-# PART 6: Save Summary Report
+# PART 6: Save Results and Summary Report
 # ============================================================================
 
-println("\n8. Saving detailed report...")
+# Save simulation results for future analysis
+println("\n8. Saving simulation results...")
+output_dir = joinpath(@__DIR__, "..", "output")
+
+# Save SDDP simulations
+sddp_file = save_simulation_results_auto(sddp_simulations, params, data; output_dir=output_dir)
+println("  ✓ SDDP results saved to: $(basename(sddp_file))")
+
+# Save EEV simulations
+eev_file = joinpath(output_dir, "eev_simulations_$(Dates.format(now(), "yyyy_mm_dd_HHMM")).jld2")
+save_simulation_results(eev_simulations, params, data, eev_file)
+println("  ✓ EEV results saved to: $(basename(eev_file))")
+
+println("\n9. Saving detailed report...")
 output_file = joinpath(@__DIR__, "..", "output", "benchmark_expected_value_summary.txt")
 open(output_file, "w") do io
     println(io, "="^70)
