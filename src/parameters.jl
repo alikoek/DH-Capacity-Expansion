@@ -19,32 +19,32 @@ struct ModelParameters
 
     # Technologies
     technologies::Vector{Symbol}
-    c_initial_capacity::Dict{Symbol, Float64}
-    c_max_additional_capacity::Dict{Symbol, Float64}
-    c_investment_cost::Dict{Symbol, Float64}
-    c_opex_fixed::Dict{Symbol, Float64}
-    c_opex_var::Dict{Symbol, Float64}
-    c_efficiency_th::Dict{Symbol, Float64}
-    c_efficiency_el::Dict{Symbol, Float64}
-    c_energy_carrier::Dict{Symbol, Symbol}
-    c_lifetime_new::Dict{Symbol, Int}
-    c_lifetime_initial::Dict{Symbol, Int}
-    c_capacity_limits::Dict{Symbol, Vector{Float64}}
+    c_initial_capacity::Dict{Symbol,Float64}
+    c_max_additional_capacity::Dict{Symbol,Float64}
+    c_investment_cost::Dict{Symbol,Float64}
+    c_opex_fixed::Dict{Symbol,Float64}
+    c_opex_var::Dict{Symbol,Float64}
+    c_efficiency_th::Dict{Symbol,Float64}
+    c_efficiency_el::Dict{Symbol,Float64}
+    c_energy_carrier::Dict{Symbol,Symbol}
+    c_lifetime_new::Dict{Symbol,Int}
+    c_lifetime_initial::Dict{Symbol,Int}
+    c_capacity_limits::Dict{Symbol,Vector{Float64}}
 
     # Storage
-    storage_params::Dict{Symbol, Float64}
+    storage_params::Dict{Symbol,Float64}
     storage_capacity_limits::Vector{Float64}
 
     # Energy carriers
-    c_emission_fac::Dict{Symbol, Float64}
-    elec_emission_factors::Dict{Int, Float64}
+    c_emission_fac::Dict{Symbol,Float64}
+    elec_emission_factors::Dict{Int,Float64}
 
     # Uncertainty configurations
-    energy_price_map::Dict{Int, Dict{Int, Dict{Symbol, Float64}}}
+    energy_price_map::Dict{Int,Dict{Int,Dict{Symbol,Float64}}}
     carbon_trajectory::Vector{Float64}  # Single net-zero trajectory
     temp_scenarios::Vector{Symbol}
-    temp_cop_multipliers::Dict{Symbol, Float64}
-    temp_scenario_probabilities::Dict{Int, Float64}
+    temp_cop_multipliers::Dict{Symbol,Float64}
+    temp_scenario_probabilities::Dict{Int,Float64}
     demand_multipliers::Vector{Float64}
     demand_probabilities::Vector{Float64}
     energy_transitions::Matrix{Float64}
@@ -55,14 +55,14 @@ struct ModelParameters
     investment_stages::Vector{Int}
 
     # Existing capacity retirement and time-varying parameters
-    c_existing_capacity_schedule::Dict{Symbol, Vector{Float64}}
+    c_existing_capacity_schedule::Dict{Symbol,Vector{Float64}}
     waste_chp_efficiency_schedule::Vector{Float64}
     waste_availability::Vector{Float64}
 
     # Extreme events (optional)
     enable_extreme_events::Bool
     apply_to_year::Int
-    extreme_events::Union{Nothing, DataFrame}
+    extreme_events::Union{Nothing,DataFrame}
 end
 
 """
@@ -85,7 +85,7 @@ function load_parameters(excel_path::String)
     config_df = DataFrame(XLSX.gettable(config_sheet))
 
     # Helper function to get parameter value
-    get_param(name) = config_df[config_df.parameter .== name, :value][1]
+    get_param(name) = config_df[config_df.parameter.==name, :value][1]
 
     T = Int(get_param("T"))
     T_years = Int(get_param("T_years"))
@@ -150,7 +150,7 @@ function load_parameters(excel_path::String)
 
     # Build capacity limits dictionary: tech -> [year_1, year_2, ..., year_T]
     # Note: -1 in Excel indicates "no limit" and is converted to Inf
-    c_capacity_limits = Dict{Symbol, Vector{Float64}}()
+    c_capacity_limits = Dict{Symbol,Vector{Float64}}()
     storage_capacity_limits = Float64[]
 
     for row in eachrow(cap_limit_df)
@@ -185,7 +185,7 @@ function load_parameters(excel_path::String)
     # Load Storage sheet
     stor_sheet = xf["Storage"]
     stor_df = DataFrame(XLSX.gettable(stor_sheet))
-    storage_params = Dict{Symbol, Float64}()
+    storage_params = Dict{Symbol,Float64}()
     for row in eachrow(stor_df)
         param_name = Symbol(row.parameter)
         value = Float64(row.value)
@@ -214,7 +214,7 @@ function load_parameters(excel_path::String)
     end
 
     # Skip electricity (has missing/time-varying emission factor)
-    c_emission_fac = Dict{Symbol, Float64}()
+    c_emission_fac = Dict{Symbol,Float64}()
     for row in eachrow(carrier_df)
         carrier = Symbol(row.carrier)
         if carrier != :elec && !ismissing(row[ef_col_name])
@@ -238,10 +238,10 @@ function load_parameters(excel_path::String)
         end
     end
 
-    elec_emission_factors = Dict{Int, Float64}()
+    elec_emission_factors = Dict{Int,Float64}()
     for model_year in 1:T
         data_year = year_mapping[model_year]
-        year_row = elec_ef_df[elec_ef_df.Year .== data_year, :]
+        year_row = elec_ef_df[elec_ef_df.Year.==data_year, :]
         if nrow(year_row) > 0
             elec_emission_factors[model_year] = round(Float64(year_row[1, elec_ef_col_name]), digits=4)
         else
@@ -267,21 +267,21 @@ function load_parameters(excel_path::String)
     end
 
     # Build nested structure: state → model_year → carrier → price
-    energy_price_map = Dict{Int, Dict{Int, Dict{Symbol, Float64}}}()
+    energy_price_map = Dict{Int,Dict{Int,Dict{Symbol,Float64}}}()
 
     for state in 1:3  # States: 1=High, 2=Medium, 3=Low
-        energy_price_map[state] = Dict{Int, Dict{Symbol, Float64}}()
+        energy_price_map[state] = Dict{Int,Dict{Symbol,Float64}}()
 
         for (data_year, model_year) in data_year_to_model
             # Filter rows for this state and year
-            rows = energy_price_df[(energy_price_df.state .== state) .& (energy_price_df.year .== data_year), :]
+            rows = energy_price_df[(energy_price_df.state.==state).&(energy_price_df.year.==data_year), :]
 
             if nrow(rows) == 0
                 error("No price data found for state=$state, year=$data_year")
             end
 
             # Extract carrier prices
-            carrier_prices = Dict{Symbol, Float64}()
+            carrier_prices = Dict{Symbol,Float64}()
             for carrier in carrier_cols
                 # Find column name with brackets
                 col_name = nothing
@@ -320,11 +320,11 @@ function load_parameters(excel_path::String)
     # Load single carbon trajectory (net-zero path)
     # Convert to TSEK: SEK → TSEK (÷1000)
     carbon_trajectory = round.([
-        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_1")]) / 1000,
-        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_2")]) / 1000,
-        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_3")]) / 1000,
-        Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_4")]) / 1000
-    ], digits=4)
+            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_1")]) / 1000,
+            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_2")]) / 1000,
+            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_3")]) / 1000,
+            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_4")]) / 1000
+        ], digits=4)
 
     # Load TemperatureScenarios sheet
     temp_scen_sheet = xf["TemperatureScenarios"]
@@ -359,7 +359,7 @@ function load_parameters(excel_path::String)
     investment_stages = collect(1:2:(2*T-1))
 
     # Load existing capacity retirement schedule
-    c_existing_capacity_schedule = Dict{Symbol, Vector{Float64}}()
+    c_existing_capacity_schedule = Dict{Symbol,Vector{Float64}}()
     if "ExistingCapacitySchedule" in XLSX.sheetnames(xf)
         schedule_df = DataFrame(XLSX.gettable(xf["ExistingCapacitySchedule"]))
         for row in eachrow(schedule_df)
@@ -412,13 +412,13 @@ function load_parameters(excel_path::String)
         control_df = DataFrame(XLSX.gettable(control_sheet))
 
         # Load enable flag
-        enable_rows = control_df[control_df.parameter .== "enable_extreme_events", :value]
+        enable_rows = control_df[control_df.parameter.=="enable_extreme_events", :value]
         if !isempty(enable_rows)
             enable_extreme_events = Bool(enable_rows[1])
         end
 
         # Load target year
-        year_rows = control_df[control_df.parameter .== "apply_to_year", :value]
+        year_rows = control_df[control_df.parameter.=="apply_to_year", :value]
         if !isempty(year_rows)
             apply_to_year = Int(year_rows[1])
         end
@@ -427,17 +427,37 @@ function load_parameters(excel_path::String)
             events_sheet = xf["ExtremeEvents"]
             extreme_events = DataFrame(XLSX.gettable(events_sheet))
 
+            # Validate required columns exist
+            required_cols = [:probability, :demand_multiplier, :elec_price_multiplier, :dc_availability]
+            missing_cols = filter(col -> !(col in propertynames(extreme_events)), required_cols)
+            if !isempty(missing_cols)
+                error("ExtremeEvents sheet missing required columns: $missing_cols")
+            end
+
             # Convert string columns to Float64 (handles decimal separator issues)
-            for col in [:probability, :demand_multiplier, :elec_price_multiplier, :dc_availability]
-                if col in propertynames(extreme_events)
-                    extreme_events[!, col] = [
-                        val isa Number ? Float64(val) : parse(Float64, replace(string(val), "," => "."))
-                        for val in extreme_events[!, col]
-                    ]
+            # Wrap conversion with clearer error reporting for malformed entries
+            function _parse_extreme_event_value(val, row_idx, col_name)
+                if val isa Number
+                    return Float64(val)
+                end
+
+                normalized = replace(string(val), "," => ".")
+                try
+                    return parse(Float64, normalized)
+                catch err
+                    error("Malformed value in 'ExtremeEvents' sheet at row=$(row_idx), column=$(col_name): '$(val)'. Parsing error: $(err.msg)")
                 end
             end
 
-            # Validate probabilities sum to 1.0
+            for col in [:probability, :demand_multiplier, :elec_price_multiplier, :dc_availability]
+                parsed_values = Vector{Float64}(undef, nrow(extreme_events))
+                for (idx, val) in enumerate(extreme_events[!, col])
+                    parsed_values[idx] = _parse_extreme_event_value(val, idx, col)
+                end
+                extreme_events[!, col] = parsed_values
+            end
+
+            # Validate probabilities sum to 1.0 after successful parsing
             prob_sum = sum(extreme_events.probability)
             if abs(prob_sum - 1.0) > 0.001
                 error("ExtremeEvents probabilities sum to $prob_sum, must sum to 1.0")

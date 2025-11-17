@@ -24,7 +24,7 @@ Matches SDDP graph structure: p_t = p_{t-2} × energy_transitions for t ∈ {4,6
 Dictionary mapping stage number → probability vector for operational stages {2,4,6,8}
 """
 function evolve_energy_probabilities(initial_dist::Vector{Float64}, transitions::Matrix{Float64})
-    probs = Dict{Int, Vector{Float64}}()
+    probs = Dict{Int,Vector{Float64}}()
     probs[2] = copy(initial_dist)
 
     # Evolve probabilities for subsequent operational stages
@@ -64,7 +64,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
     # Expected COP multiplier across DH system temperature scenarios (weighted average)
     expected_cop_multiplier = sum(params.temp_scenario_probabilities[i] *
                                   params.temp_cop_multipliers[params.temp_scenarios[i]]
-                                  for i in 1:2)
+                                  for i in eachindex(params.temp_scenarios))
     println("    Expected COP multiplier: $(round(expected_cop_multiplier, digits=3))")
 
     # Evolve energy state probabilities through Markov transitions
@@ -79,20 +79,20 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
     end
 
     # Calculate expected values for extreme events
-    expected_demand_mult = Dict{Int, Float64}()
-    expected_elec_price_mult = Dict{Int, Float64}()
-    expected_dc_avail = Dict{Int, Float64}()
+    expected_demand_mult = Dict{Int,Float64}()
+    expected_elec_price_mult = Dict{Int,Float64}()
+    expected_dc_avail = Dict{Int,Float64}()
 
     if params.enable_extreme_events && params.extreme_events !== nothing
         extreme_stage = params.apply_to_year * 2
 
         # Probability-weighted expected values
         exp_demand = sum(row.probability * row.demand_multiplier
-                        for row in eachrow(params.extreme_events))
+                         for row in eachrow(params.extreme_events))
         exp_elec_price = sum(row.probability * row.elec_price_multiplier
-                            for row in eachrow(params.extreme_events))
+                             for row in eachrow(params.extreme_events))
         exp_dc = sum(row.probability * row.dc_availability
-                    for row in eachrow(params.extreme_events))
+                     for row in eachrow(params.extreme_events))
 
         expected_demand_mult[extreme_stage] = exp_demand
         expected_elec_price_mult[extreme_stage] = exp_elec_price
@@ -131,13 +131,13 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
     for stage in vintage_stages
         cap_vintage_tech[stage] = @variable(model, [tech in params.technologies],
-                                           lower_bound = 0,
-                                           upper_bound = params.c_max_additional_capacity[tech],
-                                           base_name = "cap_vintage_tech_$(stage)")
+            lower_bound = 0,
+            upper_bound = params.c_max_additional_capacity[tech],
+            base_name = "cap_vintage_tech_$(stage)")
 
         cap_vintage_stor[stage] = @variable(model, lower_bound = 0,
-                                           upper_bound = params.storage_params[:max_capacity],
-                                           base_name = "cap_vintage_stor_$(stage)")
+            upper_bound = params.storage_params[:max_capacity],
+            base_name = "cap_vintage_stor_$(stage)")
     end
 
     # Build each stage sequentially
@@ -151,13 +151,13 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
             # Investment decision variables
             u_expansion_tech = @variable(model, [tech in params.technologies],
-                                        lower_bound = 0,
-                                        upper_bound = params.c_max_additional_capacity[tech],
-                                        base_name = "u_expansion_tech_$(t)")
+                lower_bound = 0,
+                upper_bound = params.c_max_additional_capacity[tech],
+                base_name = "u_expansion_tech_$(t)")
 
             u_expansion_storage = @variable(model, lower_bound = 0,
-                                           upper_bound = params.storage_params[:max_capacity],
-                                           base_name = "u_expansion_storage_$(t)")
+                upper_bound = params.storage_params[:max_capacity],
+                base_name = "u_expansion_storage_$(t)")
 
             inv_vars[t] = (u_expansion_tech=u_expansion_tech, u_expansion_storage=u_expansion_storage)
 
@@ -175,13 +175,13 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
             # Calculate alive capacity for next operational stage
             next_model_year = min(model_year + 1, params.T)
-            capacity_alive_next = Dict{Symbol, Any}()
+            capacity_alive_next = Dict{Symbol,Any}()
 
             for tech in params.technologies
                 capacity_expr = sum(cap_vintage_tech[stage][tech]
-                                   for stage in vintage_stages
-                                   if is_alive(stage, t + 2, params.c_lifetime_new, tech);
-                                   init=0.0)
+                                    for stage in vintage_stages
+                                    if is_alive(stage, t + 2, params.c_lifetime_new, tech);
+                    init=0.0)
 
                 # Add existing capacity
                 if haskey(params.c_existing_capacity_schedule, tech)
@@ -193,22 +193,22 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
             # Storage capacity alive next stage
             storage_cap_next = sum(cap_vintage_stor[stage]
-                                  for stage in vintage_stages
-                                  if is_storage_alive(stage, t + 2, Int(params.storage_params[:lifetime]));
-                                  init=0.0)
+                                   for stage in vintage_stages
+                                   if is_storage_alive(stage, t + 2, Int(params.storage_params[:lifetime]));
+                init=0.0)
             storage_cap_next += params.storage_params[:initial_capacity]
 
             # Multi-year look-ahead capacity constraints
             if t < 2 * params.T - 1
-                for future_year in (model_year + 1):params.T
+                for future_year in (model_year+1):params.T
                     future_stage = 2 * future_year
 
-                    capacity_alive_future = Dict{Symbol, Any}()
+                    capacity_alive_future = Dict{Symbol,Any}()
                     for tech in params.technologies
                         capacity_expr = sum(cap_vintage_tech[stage][tech]
-                                           for stage in vintage_stages
-                                           if is_alive(stage, future_stage, params.c_lifetime_new, tech);
-                                           init=0.0)
+                                            for stage in vintage_stages
+                                            if is_alive(stage, future_stage, params.c_lifetime_new, tech);
+                            init=0.0)
 
                         if haskey(params.c_existing_capacity_schedule, tech)
                             capacity_expr += params.c_existing_capacity_schedule[tech][future_year]
@@ -227,9 +227,9 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
                     # Storage capacity limit
                     storage_cap_future = sum(cap_vintage_stor[stage]
-                                            for stage in vintage_stages
-                                            if is_storage_alive(stage, future_stage, Int(params.storage_params[:lifetime]));
-                                            init=0.0)
+                                             for stage in vintage_stages
+                                             if is_storage_alive(stage, future_stage, Int(params.storage_params[:lifetime]));
+                        init=0.0)
                     storage_cap_future += params.storage_params[:initial_capacity]
 
                     storage_limit = params.storage_capacity_limits[future_year]
@@ -243,7 +243,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
             df = discount_factor(t, params.T_years, params.discount_rate)
 
             expr_invest = sum(params.c_investment_cost[tech] * u_expansion_tech[tech]
-                             for tech in params.technologies)
+                              for tech in params.technologies)
             expr_invest += params.storage_params[:capacity_cost] * u_expansion_storage
 
             # Fixed O&M costs for NEW investments
@@ -258,7 +258,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                 # Existing capacity O&M
                 if haskey(params.c_existing_capacity_schedule, tech)
                     expr_fix_om += params.c_opex_fixed[tech] *
-                                  params.c_existing_capacity_schedule[tech][model_year]
+                                   params.c_existing_capacity_schedule[tech][model_year]
                 end
             end
 
@@ -282,18 +282,18 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
             unique_carriers = unique([params.c_energy_carrier[tech] for tech in params.technologies])
             non_elec_carriers = filter(c -> c != :elec, unique_carriers)
 
-            carrier_prices = Dict{Symbol, Float64}()
+            carrier_prices = Dict{Symbol,Float64}()
             for carrier in non_elec_carriers
                 carrier_prices[carrier] = sum(
                     energy_probs[t][s] * params.energy_price_map[s][model_year][carrier]
-                    for s in 1:3
+                    for s in eachindex(energy_probs[t])
                 )
             end
 
             carbon_price = params.carbon_trajectory[model_year]
 
             # Apply expected COP multiplier (from system temperature scenarios) to efficiencies
-            efficiency_th_adjusted = Dict{Symbol, Float64}()
+            efficiency_th_adjusted = Dict{Symbol,Float64}()
             for tech in params.technologies
                 base_eff = params.c_efficiency_th[tech]
 
@@ -312,37 +312,37 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
             # Operational variables
             u_production = @variable(model, [tech in params.technologies,
-                                            week=1:data.n_weeks,
-                                            hour=1:data.hours_per_week],
-                                    lower_bound = 0,
-                                    base_name = "u_production_$(t)")
+                    week = 1:data.n_weeks,
+                    hour = 1:data.hours_per_week],
+                lower_bound = 0,
+                base_name = "u_production_$(t)")
 
-            u_charge = @variable(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
-                                lower_bound = 0,
-                                base_name = "u_charge_$(t)")
+            u_charge = @variable(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
+                lower_bound = 0,
+                base_name = "u_charge_$(t)")
 
-            u_discharge = @variable(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
-                                   lower_bound = 0,
-                                   base_name = "u_discharge_$(t)")
+            u_discharge = @variable(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
+                lower_bound = 0,
+                base_name = "u_discharge_$(t)")
 
-            u_level = @variable(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
-                               lower_bound = 0,
-                               base_name = "u_level_$(t)")
+            u_level = @variable(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
+                lower_bound = 0,
+                base_name = "u_level_$(t)")
 
-            u_unmet = @variable(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
-                               lower_bound = 0,
-                               base_name = "u_unmet_$(t)")
+            u_unmet = @variable(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
+                lower_bound = 0,
+                base_name = "u_unmet_$(t)")
 
             opr_vars[t] = (u_production=u_production, u_charge=u_charge, u_discharge=u_discharge,
-                          u_level=u_level, u_unmet=u_unmet)
+                u_level=u_level, u_unmet=u_unmet)
 
             # Calculate alive capacities
-            capacity_alive = Dict{Symbol, Any}()
+            capacity_alive = Dict{Symbol,Any}()
             for tech in params.technologies
                 capacity_expr = sum(cap_vintage_tech[stage][tech]
-                                   for stage in vintage_stages
-                                   if is_alive(stage, t, params.c_lifetime_new, tech);
-                                   init=0.0)
+                                    for stage in vintage_stages
+                                    if is_alive(stage, t, params.c_lifetime_new, tech);
+                    init=0.0)
 
                 if haskey(params.c_existing_capacity_schedule, tech)
                     capacity_expr += params.c_existing_capacity_schedule[tech][model_year]
@@ -352,13 +352,13 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
             end
 
             storage_cap = sum(cap_vintage_stor[stage]
-                             for stage in vintage_stages
-                             if is_storage_alive(stage, t, Int(params.storage_params[:lifetime]));
-                             init=0.0)
+                              for stage in vintage_stages
+                              if is_storage_alive(stage, t, Int(params.storage_params[:lifetime]));
+                init=0.0)
             storage_cap += params.storage_params[:initial_capacity]
 
             # Demand balance constraints (with extreme event expected demand multiplier)
-            @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+            @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                 sum(u_production[tech, week, hour] for tech in params.technologies) +
                 u_discharge[week, hour] - u_charge[week, hour] + u_unmet[week, hour] ==
                 data.scaled_weeks[week][hour] * expected_demand_mult[t],
@@ -368,24 +368,24 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
             for tech in params.technologies
                 if tech == :DataCenter_HeatPump
                     # Apply expected DC availability multiplier to DataCenter_HeatPump capacity
-                    @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+                    @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                         u_production[tech, week, hour] <= capacity_alive[tech] * expected_dc_avail[t],
                         base_name = "tech_capacity_$(t)_$(tech)")
                 else
-                    @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+                    @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                         u_production[tech, week, hour] <= capacity_alive[tech],
                         base_name = "tech_capacity_$(t)_$(tech)")
                 end
             end
 
             # Storage constraints
-            @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+            @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                 u_charge[week, hour] <= params.storage_params[:max_charge_rate] * storage_cap)
 
-            @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+            @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                 u_discharge[week, hour] <= params.storage_params[:max_discharge_rate] * storage_cap)
 
-            @constraint(model, [week=1:data.n_weeks, hour=1:data.hours_per_week],
+            @constraint(model, [week = 1:data.n_weeks, hour = 1:data.hours_per_week],
                 u_level[week, hour] <= storage_cap)
 
             # Storage dynamics
@@ -417,7 +417,8 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                         sum(u_production[:Waste_CHP, week, hour] / waste_eff
                             for hour in 1:data.hours_per_week)
                         for week in 1:data.n_weeks)
-                    <= params.waste_availability[model_year])
+                    <=
+                    params.waste_availability[model_year])
             end
 
             # Operational objective
@@ -462,13 +463,13 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
 
                         fuel_cost = (carrier == :elec) ? expected_purch_elec[week, hour] : carrier_prices[carrier]
                         emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] :
-                                         params.c_emission_fac[carrier]
+                                          params.c_emission_fac[carrier]
 
                         tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
-                                   (fuel_cost + carbon_price * emission_factor) *
-                                   (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
-                                   params.c_efficiency_el[tech] * expected_sale_elec[week, hour] *
-                                   (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
+                                    (fuel_cost + carbon_price * emission_factor) *
+                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
+                                    params.c_efficiency_el[tech] * expected_sale_elec[week, hour] *
+                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
                         week_cost += tech_cost
                     end
 
@@ -490,7 +491,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                         if (model_year - stage_year) < params.c_lifetime_new[tech]
                             remaining_life = params.c_lifetime_new[tech] - (model_year - stage_year)
                             salvage += params.c_investment_cost[tech] * cap_vintage_tech[stage][tech] *
-                                      (remaining_life / params.c_lifetime_new[tech])
+                                       (remaining_life / params.c_lifetime_new[tech])
                         end
                     end
                 end
@@ -501,7 +502,7 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
                     if (model_year - stage_year) < params.storage_params[:lifetime]
                         remaining_life = params.storage_params[:lifetime] - (model_year - stage_year)
                         salvage += params.storage_params[:capacity_cost] * cap_vintage_stor[stage] *
-                                  (remaining_life / params.storage_params[:lifetime])
+                                   (remaining_life / params.storage_params[:lifetime])
                     end
                 end
             end
