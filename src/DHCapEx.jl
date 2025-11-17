@@ -12,6 +12,13 @@ systems using Stochastic Dual Dynamic Programming (SDDP).
 - `generate_visualizations(simulations, params, data; output_dir)`: Create all plots
 - `export_results(simulations, params, data, output_file)`: Export detailed results
 - `print_summary_statistics(simulations, params, data)`: Print summary statistics
+- `calculate_performance_metrics(simulations, params, data)`: Calculate performance metrics
+- `export_performance_metrics(metrics, output_file)`: Export performance metrics to file
+
+# VSS Analysis Functions
+- `build_deterministic_model(params, data)`: Build expected-value deterministic benchmark
+- `extract_ev_investments(ev_model, ev_variables, params)`: Extract EV investment decisions
+- `evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios)`: Evaluate EV policy under uncertainty
 
 # Example Usage
 ```julia
@@ -29,6 +36,10 @@ simulations = run_simulation(model, params, data; iteration_limit=100, n_simulat
 generate_visualizations(simulations, params, data; output_dir="output/")
 export_results(simulations, params, data, "output/simulation_results.txt")
 print_summary_statistics(simulations, params, data)
+
+# Calculate performance metrics
+metrics = calculate_performance_metrics(simulations, params, data)
+export_performance_metrics(metrics, "output/performance_metrics.txt")
 ```
 """
 module DHCapEx
@@ -45,6 +56,10 @@ export calculate_performance_metrics, export_performance_metrics
 export generate_visualizations
 export decode_markov_state
 
+# Export VSS analysis functions
+export build_deterministic_model
+export extract_ev_investments, evaluate_ev_policy
+
 # Include all module files
 include("parameters.jl")
 include("data_processing.jl")
@@ -53,5 +68,9 @@ include("model_builder.jl")
 include("simulation.jl")
 include("simulation_metrics.jl")
 include("visualization.jl")
+
+# VSS analysis modules
+include("deterministic_model.jl")
+include("ev_policy_evaluation.jl")
 
 end # module DHCapEx
