@@ -2,7 +2,7 @@
 SDDP model construction for District Heating Capacity Expansion
 """
 
-using SDDP, Gurobi, LinearAlgebra
+using SDDP, Gurobi, LinearAlgebra, DataFrames
 
 # Note: helper_functions.jl is included by DHCapEx.jl module
 
@@ -358,22 +358,37 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 storage_cap += params.storage_params[:initial_capacity]
             end
 
-            # Demand balance constraints (deterministic demand = base_annual_demand)
-            # Form: production + discharge - charge + unmet = base_demand
+            # Demand balance constraints with named references (for extreme event RHS modification)
+            # Store constraint references for later RHS modification via SDDP.parameterize
+            demand_cons = Dict()
             for week in 1:data.n_weeks
-                @constraint(sp, [hour in 1:data.hours_per_week],
+                demand_cons[week] = @constraint(sp, [hour in 1:data.hours_per_week],
                     sum(u_production[tech, week, hour] for tech in params.technologies) +
                     u_discharge[week, hour] - u_charge[week, hour] + u_unmet[week, hour] ==
-                    data.scaled_weeks[week][hour]
+                    0.0  # Placeholder RHS - will be set via set_normalized_rhs in parameterize
                 )
             end
 
-            # Structural operational constraints (same for all demand realizations)
+            # Technology capacity constraints with named references
+            # DataCenter_HeatPump coefficient will be modified for extreme events
+            dc_cons = Dict()
             for week in 1:data.n_weeks
-                # Technology capacity constraints
-                @constraint(sp, [tech in params.technologies, hour in 1:data.hours_per_week],
-                    u_production[tech, week, hour] <= capacity_alive[tech]
-                )
+                for tech in params.technologies
+                    if tech == :DataCenter_HeatPump
+                        # Store DC constraint references for coefficient modification
+                        dc_cons[week] = @constraint(sp, [hour in 1:data.hours_per_week],
+                            1.0 * u_production[tech, week, hour] <= capacity_alive[tech]
+                        )
+                    else
+                        @constraint(sp, [hour in 1:data.hours_per_week],
+                            u_production[tech, week, hour] <= capacity_alive[tech]
+                        )
+                    end
+                end
+            end
+
+            # Storage constraints (unchanged by extreme events)
+            for week in 1:data.n_weeks
 
                 # Storage rate constraints
                 @constraint(sp, [hour in 1:data.hours_per_week],
@@ -492,47 +507,85 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 )
             end
 
-            local expr_annual_cost = 0.0
-
-            for week in 1:data.n_weeks
-                week_cost = 0.0
-                for hour in 1:data.hours_per_week
-                    # Technology production costs
-                    for tech in params.technologies
-                        carrier = params.c_energy_carrier[tech]
-
-                        # Get fuel cost based on carrier type
-                        if carrier == :elec
-                            fuel_cost = purch_elec_price[week, hour]
-                        else
-                            # Use carrier price from energy price map
-                            fuel_cost = carrier_prices[carrier]
-                        end
-
-                        # Get emission factor (time-varying for electricity, static for others)
-                        emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
-
-                        # Use temperature-adjusted efficiency
-                        tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
-                                    (fuel_cost + carbon_price * emission_factor) *
-                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
-                                    params.c_efficiency_el[tech] * sale_elec_price[week, hour] *
-                                    (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
-                        week_cost += tech_cost
-                    end
-
-                    # Storage operational cost (only on discharge)
-                    week_cost += params.storage_params[:variable_om] * u_discharge[week, hour]
-
-                    # Unmet demand penalty
-                    week_cost += params.c_penalty * u_unmet[week, hour]
-                end
-
-                # Apply week weight
-                expr_annual_cost += data.week_weights_normalized[week] * week_cost
+            # ===== EXTREME EVENTS PARAMETERIZATION =====
+            # Determine scenarios based on Excel configuration
+            extreme_stage = params.apply_to_year * 2  # Convert model year to stage
+            if params.enable_extreme_events && t == extreme_stage && params.extreme_events !== nothing
+                # Use 4 scenarios from ExtremeEvents sheet
+                Ω_extreme = [(demand_mult = row.demand_multiplier,
+                             elec_price_mult = row.elec_price_multiplier,
+                             dc_avail = row.dc_availability,
+                             prob = row.probability)
+                            for row in eachrow(params.extreme_events)]
+            else
+                # Default: single scenario with no multipliers
+                Ω_extreme = [(demand_mult = 1.0, elec_price_mult = 1.0, dc_avail = 1.0, prob = 1.0)]
             end
 
-            @stageobjective(sp, df * (params.T_years * expr_annual_cost - salvage * params.salvage_fraction))
+            # Parameterize: modify constraint RHS/coefficients and set objective
+            SDDP.parameterize(sp, Ω_extreme) do ω
+                # 1. Modify demand balance RHS for each constraint
+                for week in 1:data.n_weeks, hour in 1:data.hours_per_week
+                    JuMP.set_normalized_rhs(
+                        demand_cons[week][hour],
+                        data.scaled_weeks[week][hour] * ω.demand_mult
+                    )
+                end
+
+                # 2. Modify DC capacity constraint coefficient (effectively capacity * dc_avail)
+                if :DataCenter_HeatPump in params.technologies
+                    for week in 1:data.n_weeks, hour in 1:data.hours_per_week
+                        JuMP.set_normalized_coefficient(
+                            dc_cons[week][hour],
+                            u_production[:DataCenter_HeatPump, week, hour],
+                            ω.dc_avail  # When dc_avail=0, production must be 0
+                        )
+                    end
+                end
+
+                # 3. Calculate operational cost with scenario-dependent electricity prices
+                local expr_annual_cost = 0.0
+
+                for week in 1:data.n_weeks
+                    week_cost = 0.0
+                    for hour in 1:data.hours_per_week
+                        # Technology production costs
+                        for tech in params.technologies
+                            carrier = params.c_energy_carrier[tech]
+
+                            # Get fuel cost with electricity price multiplier
+                            if carrier == :elec
+                                fuel_cost = purch_elec_price[week, hour] * ω.elec_price_mult
+                            else
+                                # Use carrier price from energy price map
+                                fuel_cost = carrier_prices[carrier]
+                            end
+
+                            # Get emission factor (time-varying for electricity, static for others)
+                            emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
+
+                            # Use temperature-adjusted efficiency
+                            tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +
+                                        (fuel_cost + carbon_price * emission_factor) *
+                                        (u_production[tech, week, hour] / efficiency_th_adjusted[tech]) -
+                                        params.c_efficiency_el[tech] * sale_elec_price[week, hour] * ω.elec_price_mult *
+                                        (u_production[tech, week, hour] / efficiency_th_adjusted[tech])
+                            week_cost += tech_cost
+                        end
+
+                        # Storage operational cost (only on discharge)
+                        week_cost += params.storage_params[:variable_om] * u_discharge[week, hour]
+
+                        # Unmet demand penalty
+                        week_cost += params.c_penalty * u_unmet[week, hour]
+                    end
+
+                    # Apply week weight
+                    expr_annual_cost += data.week_weights_normalized[week] * week_cost
+                end
+
+                @stageobjective(sp, df * (params.T_years * expr_annual_cost - salvage * params.salvage_fraction))
+            end  # End of SDDP.parameterize
         end
     end
 

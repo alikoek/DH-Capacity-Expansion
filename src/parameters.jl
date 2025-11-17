@@ -58,6 +58,11 @@ struct ModelParameters
     c_existing_capacity_schedule::Dict{Symbol, Vector{Float64}}
     waste_chp_efficiency_schedule::Vector{Float64}
     waste_availability::Vector{Float64}
+
+    # Extreme events (optional)
+    enable_extreme_events::Bool
+    apply_to_year::Int
+    extreme_events::Union{Nothing, DataFrame}
 end
 
 """
@@ -397,6 +402,60 @@ function load_parameters(excel_path::String)
         waste_availability = fill(1e6, T)
     end
 
+    # Load Extreme Events (optional)
+    enable_extreme_events = false
+    apply_to_year = 2  # Default to Year 2
+    extreme_events = nothing
+
+    if "ExtremeEventControl" in XLSX.sheetnames(xf)
+        control_sheet = xf["ExtremeEventControl"]
+        control_df = DataFrame(XLSX.gettable(control_sheet))
+
+        # Load enable flag
+        enable_rows = control_df[control_df.parameter .== "enable_extreme_events", :value]
+        if !isempty(enable_rows)
+            enable_extreme_events = Bool(enable_rows[1])
+        end
+
+        # Load target year
+        year_rows = control_df[control_df.parameter .== "apply_to_year", :value]
+        if !isempty(year_rows)
+            apply_to_year = Int(year_rows[1])
+        end
+
+        if enable_extreme_events && "ExtremeEvents" in XLSX.sheetnames(xf)
+            events_sheet = xf["ExtremeEvents"]
+            extreme_events = DataFrame(XLSX.gettable(events_sheet))
+
+            # Convert string columns to Float64 (handles decimal separator issues)
+            for col in [:probability, :demand_multiplier, :elec_price_multiplier, :dc_availability]
+                if col in propertynames(extreme_events)
+                    extreme_events[!, col] = [
+                        val isa Number ? Float64(val) : parse(Float64, replace(string(val), "," => "."))
+                        for val in extreme_events[!, col]
+                    ]
+                end
+            end
+
+            # Validate probabilities sum to 1.0
+            prob_sum = sum(extreme_events.probability)
+            if abs(prob_sum - 1.0) > 0.001
+                error("ExtremeEvents probabilities sum to $prob_sum, must sum to 1.0")
+            end
+
+            println("  Extreme events ENABLED:")
+            println("    Applied to Year $apply_to_year (stage $(apply_to_year * 2))")
+            println("    Number of scenarios: $(nrow(extreme_events))")
+            for row in eachrow(extreme_events)
+                println("      - $(row.scenario): p=$(row.probability)")
+            end
+        else
+            println("  Extreme events configuration found but DISABLED or missing ExtremeEvents sheet")
+        end
+    else
+        println("  No extreme event configuration found (optional)")
+    end
+
     return ModelParameters(
         T, T_years, discount_rate, base_annual_demand, salvage_fraction,
         c_penalty, elec_taxes_levies,
@@ -409,6 +468,7 @@ function load_parameters(excel_path::String)
         demand_multipliers, demand_probabilities, energy_transitions, initial_energy_dist,
         use_stochastic_demand,
         investment_stages,
-        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability
+        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability,
+        enable_extreme_events, apply_to_year, extreme_events
     )
 end
