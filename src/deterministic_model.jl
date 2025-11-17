@@ -538,6 +538,17 @@ function build_deterministic_model(params::ModelParameters, data::ProcessedData)
     println("  Total variables: $(num_variables(model))")
     println("  Total constraints: $(num_constraints(model; count_variable_in_set_constraints=false))")
 
+    # Solve the model
+    println("\nSolving deterministic model...")
+    JuMP.optimize!(model)
+
+    if JuMP.termination_status(model) != JuMP.OPTIMAL
+        @warn "Deterministic model did not solve to optimality. Status: $(JuMP.termination_status(model))"
+    else
+        println("✓ Model solved successfully")
+        println("  Objective value: $(JuMP.objective_value(model))")
+    end
+
     # Return model and variable references for post-processing
     variables = Dict(
         :inv_vars => inv_vars,

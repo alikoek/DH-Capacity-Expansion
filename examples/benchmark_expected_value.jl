@@ -196,7 +196,7 @@ println("="^70)
 
 println("\n9. Evaluating EV investment policy under uncertainty...")
 Random.seed!(12345)  # Use SAME seed to ensure identical scenarios
-eev_mean, eev_std = evaluate_ev_policy(sddp_model, ev_investments_all, params, 500; verbose=true)
+eev_simulations, eev_mean, eev_std = evaluate_ev_policy(sddp_model, ev_investments_all, params, 500; verbose=true, random_seed=12345)
 
 # Calculate proper VSS
 vss = eev_mean - sddp_mean_cost
