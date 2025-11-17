@@ -45,11 +45,8 @@ struct ModelParameters
     temp_scenarios::Vector{Symbol}
     temp_cop_multipliers::Dict{Symbol,Float64}
     temp_scenario_probabilities::Dict{Int,Float64}
-    demand_multipliers::Vector{Float64}
-    demand_probabilities::Vector{Float64}
     energy_transitions::Matrix{Float64}
     initial_energy_dist::Vector{Float64}
-    use_stochastic_demand::Bool
 
     # Investment stages
     investment_stages::Vector{Int}
@@ -95,13 +92,6 @@ function load_parameters(excel_path::String)
     # Convert to TSEK: SEK → TSEK (÷1000)
     c_penalty = round(Float64(get_param("c_penalty")) / 1000, digits=2)
     elec_taxes_levies = round(Float64(get_param("elec_taxes_levies")) / 1000, digits=2)
-
-    # Demand uncertainty switch (default to false/deterministic if not in Excel)
-    use_stochastic_demand = try
-        Bool(get_param("use_stochastic_demand"))
-    catch
-        false  # Default to deterministic
-    end
 
     # Load Technologies sheet
     tech_sheet = xf["Technologies"]
@@ -337,12 +327,6 @@ function load_parameters(excel_path::String)
     temp_prob_df = DataFrame(XLSX.gettable(temp_prob_sheet))
     temp_scenario_probabilities = Dict(zip(Int.(temp_prob_df.scenario), round.(Float64.(temp_prob_df.probability), digits=4)))
 
-    # Load DemandUncertainty sheet
-    demand_unc_sheet = xf["DemandUncertainty"]
-    demand_unc_df = DataFrame(XLSX.gettable(demand_unc_sheet))
-    demand_multipliers = round.(Float64.(demand_unc_df.multiplier), digits=4)  # 4 digits for multipliers like 0.95, 1.05
-    demand_probabilities = round.(Float64.(demand_unc_df.probability), digits=4)
-
     # Load EnergyTransitions sheet
     energy_trans_sheet = xf["EnergyTransitions"]
     energy_trans_df = DataFrame(XLSX.gettable(energy_trans_sheet))
@@ -485,8 +469,7 @@ function load_parameters(excel_path::String)
         c_capacity_limits,
         storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
         energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_scenario_probabilities,
-        demand_multipliers, demand_probabilities, energy_transitions, initial_energy_dist,
-        use_stochastic_demand,
+        energy_transitions, initial_energy_dist,
         investment_stages,
         c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability,
         enable_extreme_events, apply_to_year, extreme_events
