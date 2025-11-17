@@ -30,6 +30,8 @@ using Plots
 using StatsPlots
 using DataFrames
 using Printf
+using Dates
+using Random
 
 ##############################################################################
 # Configuration - Choose which analyses to run
@@ -43,11 +45,11 @@ RUN_SIMPLE_MODELS = false    # Compare with two-stage and single-stage (slower)
 RUN_SOLUTION_QUALITY = true  # Non-cost metrics (unmet demand, etc.)
 
 # Model parameters
-ITERATION_LIMIT_SDDP = 100    # For SDDP training
+ITERATION_LIMIT_SDDP = 10    # For SDDP training (increase to 300-500 for production)
 ITERATION_LIMIT_DET = 100     # For deterministic training
-N_SIMULATIONS = 500           # Monte Carlo simulations
+N_SIMULATIONS = 500           # Monte Carlo simulations (minimum 100, recommend 500-1000)
 RANDOM_SEED = 1234
-RISK_LEVELS = [0.90, 0.95, 0.99]  # CVaR confidence levels to test
+RISK_LEVELS = [0.95]  # CVaR confidence levels to test (add [0.90, 0.99] for production)
 
 # File paths
 project_dir = dirname(@__DIR__)
@@ -66,7 +68,7 @@ mkpath(output_dir)
 Calculate risk metrics for a cost distribution
 """
 function calculate_risk_metrics(costs::Vector{Float64})
-    metrics = Dict{String, Float64}()
+    metrics = Dict{String,Float64}()
     metrics["mean"] = mean(costs)
     metrics["std"] = std(costs)
     metrics["min"] = minimum(costs)
@@ -82,11 +84,11 @@ end
 """
 Extract solution characteristics (technology mix, timing, etc.)
 """
-function extract_solution_characteristics(simulations, params)
-    characteristics = Dict{String, Any}()
+function extract_solution_characteristics(simulations, params, data)
+    characteristics = Dict{String,Any}()
 
     # Average first-stage investments
-    first_stage_inv = Dict{Symbol, Float64}()
+    first_stage_inv = Dict{Symbol,Float64}()
     for tech in params.technologies
         investments = [value(sim[1][:u_expansion_tech][tech]) for sim in simulations]
         first_stage_inv[tech] = mean(investments)
@@ -108,8 +110,8 @@ function extract_solution_characteristics(simulations, params)
         for t in 2:2:(params.T*2)  # Operational stages
             if haskey(sim[t], :u_unmet)
                 # Sum over all weeks and hours
-                for week in 1:size(sim[t][:u_unmet], 1)
-                    for hour in 1:size(sim[t][:u_unmet], 2)
+                for week in 1:data.n_weeks
+                    for hour in 1:data.hours_per_week
                         unmet += value(sim[t][:u_unmet][week, hour])
                     end
                 end
@@ -138,7 +140,9 @@ function calculate_standard_vss(params, data)
 
     # Build and solve SDDP model (RP)
     println("\n1. Training SDDP model (Recourse Problem)...")
+    println("   Building model...")
     sddp_model = build_sddp_model(params, data)
+    println("   Training with $ITERATION_LIMIT_SDDP iterations...")
     SDDP.train(sddp_model;
         risk_measure=SDDP.Expectation(),
         iteration_limit=ITERATION_LIMIT_SDDP,
@@ -146,28 +150,41 @@ function calculate_standard_vss(params, data)
         print_level=1,
         log_frequency=10
     )
+    println("   ✓ SDDP training complete")
 
     println("\n2. Running SDDP simulations...")
+    println("   Running $N_SIMULATIONS Monte Carlo simulations...")
+    # CRITICAL: Set random seed for reproducibility and fair VSS comparison
+    # SDDP and EEV must be evaluated on IDENTICAL scenarios
+    Random.seed!(RANDOM_SEED)
     sddp_simulations = SDDP.simulate(sddp_model, N_SIMULATIONS,
         [:u_production, :u_expansion_tech, :u_expansion_storage, :u_unmet])
+    println("   ✓ SDDP simulations complete")
 
+    println("   Calculating costs...")
     sddp_costs = get_simulation_costs(sddp_simulations)
     RP = mean(sddp_costs)
+    println("   ✓ RP (SDDP mean cost): $(round(RP/1e6, digits=2)) GSEK")
 
     # Build and solve deterministic model (EV)
     println("\n3. Building deterministic (EV) model...")
     ev_model, ev_variables = build_deterministic_model(params, data)
+    println("   ✓ Deterministic model solved")
 
     println("\n4. Extracting EV investments...")
     ev_investments = extract_ev_investments(ev_model, ev_variables, params)
+    println("   ✓ EV investments extracted")
 
     # Evaluate EV policy (EEV)
     println("\n5. Evaluating EV policy under uncertainty...")
-    eev_simulations = evaluate_ev_policy(sddp_model, ev_investments, params, N_SIMULATIONS;
-                                         random_seed=RANDOM_SEED)
+    eev_simulations, eev_mean, eev_std = evaluate_ev_policy(sddp_model, ev_investments, params, N_SIMULATIONS;
+        random_seed=RANDOM_SEED)
+    println("   ✓ EV policy evaluation complete")
 
+    println("   Calculating EEV costs...")
     eev_costs = get_simulation_costs(eev_simulations)
     EEV = mean(eev_costs)
+    println("   ✓ EEV (EV policy cost): $(round(EEV/1e6, digits=2)) GSEK")
 
     # Calculate VSS
     VSS = EEV - RP
@@ -205,45 +222,49 @@ function calculate_risk_adjusted_vss(standard_results)
     sddp_costs = standard_results["sddp_costs"]
     eev_costs = standard_results["eev_costs"]
 
-    results = Dict{String, Any}()
+    results = Dict{String,Any}()
 
     for α in RISK_LEVELS
-        # Calculate CVaR for both distributions
-        sddp_cvar = quantile(sddp_costs, α)
-        eev_cvar = quantile(eev_costs, α)
+        # Calculate VaR (Value-at-Risk = α-quantile, e.g., 95th percentile)
+        sddp_var = quantile(sddp_costs, α)
+        eev_var = quantile(eev_costs, α)
 
-        # Calculate tail mean (mean of costs above CVaR)
-        sddp_tail = sddp_costs[sddp_costs .>= sddp_cvar]
-        eev_tail = eev_costs[eev_costs .>= eev_cvar]
+        # Calculate CVaR (Conditional Value-at-Risk = tail mean above VaR threshold)
+        sddp_tail = sddp_costs[sddp_costs.>=sddp_var]
+        eev_tail = eev_costs[eev_costs.>=eev_var]
 
-        sddp_tail_mean = mean(sddp_tail)
-        eev_tail_mean = mean(eev_tail)
+        sddp_cvar = mean(sddp_tail)  # This is the actual CVaR
+        eev_cvar = mean(eev_tail)
 
-        # Risk-adjusted VSS
-        ravss = eev_cvar - sddp_cvar
-        ravss_tail = eev_tail_mean - sddp_tail_mean
-        relative_ravss = 100 * ravss / sddp_cvar
+        # Risk-adjusted VSS using CVaR (tail mean)
+        ravss_cvar = eev_cvar - sddp_cvar
+        ravss_var = eev_var - sddp_var  # Alternative: VSS at VaR threshold
+        relative_ravss_cvar = 100 * ravss_cvar / sddp_cvar
 
         results["cvar_$(Int(100α))"] = Dict(
-            "sddp_cvar" => sddp_cvar,
+            "sddp_var" => sddp_var,        # VaR (α-quantile)
+            "eev_var" => eev_var,
+            "sddp_cvar" => sddp_cvar,      # CVaR (tail mean)
             "eev_cvar" => eev_cvar,
-            "ravss" => ravss,
-            "ravss_percent" => relative_ravss,
-            "sddp_tail_mean" => sddp_tail_mean,
-            "eev_tail_mean" => eev_tail_mean,
-            "ravss_tail" => ravss_tail
+            "ravss_cvar" => ravss_cvar,    # VSS using CVaR
+            "ravss_var" => ravss_var,      # VSS using VaR
+            "ravss_percent" => relative_ravss_cvar
         )
 
-        println("\nCVaR $(Int(100α))% Results:")
-        println("  SDDP CVaR: $(round(sddp_cvar/1e6, digits=2)) GSEK")
+        println("\nRisk Analysis at α=$(Int(100α))%:")
+        println("  VaR ($(Int(100α))th percentile):")
+        println("    SDDP: $(round(sddp_var/1e6, digits=2)) GSEK")
+        println("    EV Policy: $(round(eev_var/1e6, digits=2)) GSEK")
+        println("  CVaR (tail mean above VaR):")
+        println("    SDDP: $(round(sddp_cvar/1e6, digits=2)) GSEK")
         println("  EV Policy CVaR: $(round(eev_cvar/1e6, digits=2)) GSEK")
-        println("  Risk-Adjusted VSS: $(round(ravss/1e3, digits=2)) MSEK ($(round(relative_ravss, digits=2))%)")
-        println("  Tail Mean VSS: $(round(ravss_tail/1e3, digits=2)) MSEK")
+        println("  Risk-Adjusted VSS (CVaR): $(round(ravss_cvar/1e3, digits=2)) MSEK ($(round(relative_ravss_cvar, digits=2))%)")
+        println("  Risk-Adjusted VSS (VaR): $(round(ravss_var/1e3, digits=2)) MSEK")
     end
 
     # Create distribution plot
-    p = violin([1], standard_results["sddp_costs"]/1e6, label="SDDP", fillalpha=0.7, color=:blue)
-    violin!([2], standard_results["eev_costs"]/1e6, label="EV Policy", fillalpha=0.7, color=:red)
+    p = violin([1], standard_results["sddp_costs"] / 1e6, label="SDDP", fillalpha=0.7, color=:blue)
+    violin!([2], standard_results["eev_costs"] / 1e6, label="EV Policy", fillalpha=0.7, color=:red)
 
     # Add CVaR lines
     for α in RISK_LEVELS
@@ -279,10 +300,12 @@ function calculate_conditional_vss(standard_results, params)
 
     sddp_sims = standard_results["sddp_simulations"]
     eev_sims = standard_results["eev_simulations"]
+    sddp_costs = standard_results["sddp_costs"]  # Pre-calculated costs
+    eev_costs = standard_results["eev_costs"]    # Pre-calculated costs
     extreme_stage = params.apply_to_year * 2
 
     # Get unique extreme event scenarios
-    scenarios = Dict{String, Tuple{Float64, Float64, Float64}}()
+    scenarios = Dict{String,Tuple{Float64,Float64,Float64}}()
     for sim in sddp_sims
         if haskey(sim[extreme_stage], :noise_term)
             noise = sim[extreme_stage][:noise_term]
@@ -291,7 +314,7 @@ function calculate_conditional_vss(standard_results, params)
         end
     end
 
-    results = Dict{String, Any}()
+    results = Dict{String,Any}()
 
     for (scenario_name, (d_mult, e_mult, dc_avail)) in scenarios
         # Filter simulations by scenario
@@ -299,11 +322,9 @@ function calculate_conditional_vss(standard_results, params)
         eev_filtered = filter_simulations_by_extreme_event(eev_sims, params, d_mult, e_mult, dc_avail)
 
         if !isempty(sddp_filtered) && !isempty(eev_filtered)
-            # Get costs for filtered simulations
-            sddp_scenario_costs = [sum(sddp_sims[idx][t][:stage_objective] for t in 1:length(sddp_sims[1]))
-                                  for idx in sddp_filtered]
-            eev_scenario_costs = [sum(eev_sims[idx][t][:stage_objective] for t in 1:length(eev_sims[1]))
-                                 for idx in eev_filtered]
+            # Get costs for filtered simulations using pre-calculated cost arrays
+            sddp_scenario_costs = sddp_costs[sddp_filtered]
+            eev_scenario_costs = eev_costs[eev_filtered]
 
             mean_sddp = mean(sddp_scenario_costs)
             mean_eev = mean(eev_scenario_costs)
@@ -329,20 +350,20 @@ function calculate_conditional_vss(standard_results, params)
     # Create bar plot of conditional VSS
     if !isempty(results)
         scenarios = collect(keys(results))
-        vss_values = [results[s]["conditional_vss"]/1e3 for s in scenarios]
+        vss_values = [results[s]["conditional_vss"] / 1e3 for s in scenarios]
         vss_percents = [results[s]["vss_percent"] for s in scenarios]
 
         p = bar(scenarios, vss_values,
-                label="VSS (MSEK)",
-                ylabel="VSS (MSEK)",
-                xlabel="Extreme Event Scenario",
-                title="Conditional VSS by Extreme Event",
-                rotation=45,
-                fillalpha=0.7)
+            label="VSS (MSEK)",
+            ylabel="VSS (MSEK)",
+            xlabel="Extreme Event Scenario",
+            title="Conditional VSS by Extreme Event",
+            rotation=45,
+            fillalpha=0.7)
 
         # Add percentage labels
         for (i, (v, pct)) in enumerate(zip(vss_values, vss_percents))
-            annotate!(i, v + maximum(vss_values)*0.02, text("$(round(pct, digits=1))%", 8))
+            annotate!(i, v + maximum(vss_values) * 0.02, text("$(round(pct, digits=1))%", 8))
         end
 
         savefig(p, joinpath(output_dir, "conditional_vss.png"))
@@ -372,16 +393,16 @@ end
 """
 Compare solution quality metrics beyond cost
 """
-function analyze_solution_quality(standard_results, params)
+function analyze_solution_quality(standard_results, params, data)
     println("\n" * "="^80)
     println("SOLUTION QUALITY METRICS")
     println("="^80)
 
-    sddp_chars = extract_solution_characteristics(standard_results["sddp_simulations"], params)
-    eev_chars = extract_solution_characteristics(standard_results["eev_simulations"], params)
+    sddp_chars = extract_solution_characteristics(standard_results["sddp_simulations"], params, data)
+    eev_chars = extract_solution_characteristics(standard_results["eev_simulations"], params, data)
 
     println("\nFirst-Stage Investment Comparison:")
-    println("-" * 40)
+    println("-"^40)
     for tech in params.technologies
         sddp_inv = sddp_chars["first_stage_investments"][tech]
         eev_inv = eev_chars["first_stage_investments"][tech]
@@ -393,7 +414,7 @@ function analyze_solution_quality(standard_results, params)
     end
 
     println("\nStorage Investment Timing:")
-    println("-" * 40)
+    println("-"^40)
     for (i, stage) in enumerate(params.investment_stages)
         sddp_stor = sddp_chars["storage_timing"][i]
         eev_stor = eev_chars["storage_timing"][i]
@@ -403,7 +424,7 @@ function analyze_solution_quality(standard_results, params)
     end
 
     println("\nOperational Performance:")
-    println("-" * 40)
+    println("-"^40)
     println("Unmet Demand:")
     println("  SDDP: $(round(sddp_chars["unmet_demand"], digits=2)) ± $(round(sddp_chars["unmet_demand_std"], digits=2)) MWh")
     println("  EV: $(round(eev_chars["unmet_demand"], digits=2)) ± $(round(eev_chars["unmet_demand_std"], digits=2)) MWh")
@@ -450,7 +471,7 @@ function export_vss_results(all_results, output_file)
                 println(io, "\nCVaR $(Int(100α))%:")
                 println(io, "  SDDP CVaR: $(round(res["sddp_cvar"]/1e6, digits=3)) GSEK")
                 println(io, "  EV CVaR: $(round(res["eev_cvar"]/1e6, digits=3)) GSEK")
-                println(io, "  Risk-Adjusted VSS: $(round(res["ravss"]/1e3, digits=3)) MSEK ($(round(res["ravss_percent"], digits=2))%)")
+                println(io, "  Risk-Adjusted VSS: $(round(res["ravss_cvar"]/1e3, digits=3)) MSEK ($(round(res["ravss_percent"], digits=2))%)")
             end
         end
 
@@ -511,37 +532,45 @@ function main()
     data = load_all_data(params, data_dir)
 
     # Store all results
-    all_results = Dict{String, Any}()
+    all_results = Dict{String,Any}()
 
     # 1. Standard VSS (required for other analyses)
     if RUN_STANDARD_VSS || RUN_RISK_ADJUSTED || RUN_CONDITIONAL_VSS || RUN_SOLUTION_QUALITY
+        println("\n>>> Starting Standard VSS Analysis...")
         standard_results = calculate_standard_vss(params, data)
         all_results["standard"] = standard_results
 
         # Save intermediate results
         println("\nSaving simulation data...")
         save_simulation_results(standard_results["sddp_simulations"], params, data,
-                               joinpath(output_dir, "sddp_simulations.jld2"))
+            joinpath(output_dir, "sddp_simulations.jld2"))
         save_simulation_results(standard_results["eev_simulations"], params, data,
-                               joinpath(output_dir, "eev_simulations.jld2"))
+            joinpath(output_dir, "eev_simulations.jld2"))
+        println("✓ Standard VSS analysis complete")
     end
 
     # 2. Risk-Adjusted VSS
     if RUN_RISK_ADJUSTED && haskey(all_results, "standard")
+        println("\n>>> Starting Risk-Adjusted VSS Analysis...")
         risk_results = calculate_risk_adjusted_vss(all_results["standard"])
         all_results["risk_adjusted"] = risk_results
+        println("✓ Risk-Adjusted VSS analysis complete")
     end
 
     # 3. Conditional VSS
     if RUN_CONDITIONAL_VSS && haskey(all_results, "standard")
+        println("\n>>> Starting Conditional VSS Analysis...")
         conditional_results = calculate_conditional_vss(all_results["standard"], params)
         all_results["conditional"] = conditional_results
+        println("✓ Conditional VSS analysis complete")
     end
 
     # 4. Solution Quality
     if RUN_SOLUTION_QUALITY && haskey(all_results, "standard")
-        quality_results = analyze_solution_quality(all_results["standard"], params)
+        println("\n>>> Starting Solution Quality Analysis...")
+        quality_results = analyze_solution_quality(all_results["standard"], params, data)
         all_results["solution_quality"] = quality_results
+        println("✓ Solution quality analysis complete")
     end
 
     # 5. Export all results
@@ -557,7 +586,7 @@ function main()
         println("  Standard VSS: $(round(all_results["standard"]["VSS"]/1e3, digits=2)) MSEK ($(round(all_results["standard"]["VSS_percent"], digits=2))%)")
 
         if haskey(all_results, "risk_adjusted")
-            ravss_95 = all_results["risk_adjusted"]["cvar_95"]["ravss"]
+            ravss_95 = all_results["risk_adjusted"]["cvar_95"]["ravss_cvar"]
             ravss_95_pct = all_results["risk_adjusted"]["cvar_95"]["ravss_percent"]
             println("  Risk-Adjusted VSS (CVaR 95%): $(round(ravss_95/1e3, digits=2)) MSEK ($(round(ravss_95_pct, digits=2))%)")
         end

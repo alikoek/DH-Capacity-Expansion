@@ -64,13 +64,22 @@ Evaluate the EV (deterministic) investment policy under uncertainty by:
 - `ev_investments`: Investment decisions from deterministic model (from extract_ev_investments)
 - `params`: ModelParameters structure
 - `n_scenarios`: Number of Monte Carlo simulations to run
+- `verbose`: Print detailed diagnostics (default: false)
+- `random_seed`: Optional random seed for reproducibility (default: nothing)
 
 # Returns
-Tuple of (eev_mean, eev_std) where:
+Tuple of (simulations, eev_mean, eev_std) where:
+- `simulations`: Full simulation results for detailed analysis
 - `eev_mean`: Expected cost of using EV decisions under uncertainty (EEV)
 - `eev_std`: Standard deviation of costs across scenarios
 """
-function evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios; verbose=false)
+function evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios; verbose=false, random_seed=nothing)
+    # Set random seed BEFORE any model modifications for reproducibility
+    # This ensures SDDP and EEV simulations use identical random scenarios
+    if random_seed !== nothing
+        Random.seed!(random_seed)
+    end
+
     println("  Fixing EV investment decisions in SDDP model...")
 
     # Sort stages for consistent output
@@ -130,11 +139,16 @@ function evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios; ver
 
     println("  Running $(n_scenarios) simulations with fixed EV investments...")
 
+    # Note: Random seed was already set at the beginning of the function
+
     # Simulate with fixed investments
     # Operations are still optimized based on realized uncertainty
+    # Record key variables for analysis (matches run_simulation pattern)
+    simulation_symbols = [:u_production, :u_expansion_tech, :u_expansion_storage, :u_unmet]
     simulations = SDDP.simulate(
         sddp_model,
-        n_scenarios;
+        n_scenarios,
+        simulation_symbols;
         parallel_scheme=SDDP.Threaded()
     )
 
@@ -162,5 +176,5 @@ function evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios; ver
     eev_mean = Statistics.mean(scenario_costs)
     eev_std = Statistics.std(scenario_costs)
 
-    return eev_mean, eev_std
+    return simulations, eev_mean, eev_std
 end
