@@ -4,8 +4,6 @@ Model training, simulation, and results export
 
 using SDDP, Random, Statistics
 
-include("helper_functions.jl")
-
 """
     run_simulation(model, params::ModelParameters, data::ProcessedData;
                   risk_measure=SDDP.CVaR(0.95), iteration_limit=100,
@@ -227,6 +225,38 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             vprint("Year $(div(t, 2)) - Operational Stage")
             println(io, "Year $(div(t, 2)) - Operational Stage")
 
+            # Check for extreme event information
+            if params.enable_extreme_events && t == params.apply_to_year * 2
+                if haskey(sp, :noise_term)
+                    noise = sp[:noise_term]
+                    vprint("  Extreme Event Scenario:")
+                    println(io, "  Extreme Event Scenario:")
+
+                    # Determine scenario name based on multipliers
+                    scenario_name = "Unknown"
+                    if noise.demand_mult ≈ 1.0 && noise.elec_price_mult ≈ 1.0 && noise.dc_avail ≈ 1.0
+                        scenario_name = "Baseline"
+                    elseif noise.demand_mult > 1.2
+                        scenario_name = "Cold Snap"
+                    elseif noise.elec_price_mult > 1.5
+                        scenario_name = "Price Surge"
+                    elseif noise.dc_avail < 0.5
+                        scenario_name = "DC Outage"
+                    else
+                        scenario_name = "Combined Event"
+                    end
+
+                    vprint("    Scenario: $scenario_name")
+                    println(io, "    Scenario: $scenario_name")
+                    vprint("    Demand multiplier: $(noise.demand_mult)")
+                    println(io, "    Demand multiplier: $(noise.demand_mult)")
+                    vprint("    Electricity price multiplier: $(noise.elec_price_mult)")
+                    println(io, "    Electricity price multiplier: $(noise.elec_price_mult)")
+                    vprint("    DC availability: $(noise.dc_avail)")
+                    println(io, "    DC availability: $(noise.dc_avail)")
+                end
+            end
+
             # Calculate total annual demand across all representative weeks
             annual_demand = 0.0
             for week in 1:data.n_weeks
@@ -289,6 +319,47 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             vprint("  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
             println(io, "  Total Production = ", round(total_production, digits=2), " MWh")
             println(io, "  Total Unmet Demand = ", round(total_unmet, digits=2), " MWh")
+        end
+    end
+
+    # Add extreme events summary if enabled
+    if params.enable_extreme_events
+        vprint("\n=== EXTREME EVENTS SUMMARY ===")
+        println(io, "\n=== EXTREME EVENTS SUMMARY ===")
+
+        # Count occurrences of each extreme event scenario
+        extreme_stage = params.apply_to_year * 2
+        scenario_counts = Dict{String, Int}()
+
+        for (sim_idx, sim) in enumerate(simulations)
+            if haskey(sim[extreme_stage], :noise_term)
+                noise = sim[extreme_stage][:noise_term]
+
+                # Determine scenario name
+                scenario_name = "Unknown"
+                if noise.demand_mult ≈ 1.0 && noise.elec_price_mult ≈ 1.0 && noise.dc_avail ≈ 1.0
+                    scenario_name = "Baseline"
+                elseif noise.demand_mult > 1.2
+                    scenario_name = "Cold Snap"
+                elseif noise.elec_price_mult > 1.5
+                    scenario_name = "Price Surge"
+                elseif noise.dc_avail < 0.5
+                    scenario_name = "DC Outage"
+                else
+                    scenario_name = "Combined Event"
+                end
+
+                scenario_counts[scenario_name] = get(scenario_counts, scenario_name, 0) + 1
+            end
+        end
+
+        vprint("Extreme Event Occurrences (out of $(length(simulations)) simulations):")
+        println(io, "Extreme Event Occurrences (out of $(length(simulations)) simulations):")
+
+        for (scenario, count) in sort(collect(scenario_counts), by=x->x[2], rev=true)
+            freq = round(100 * count / length(simulations), digits=1)
+            vprint("  $scenario: $count times ($freq%)")
+            println(io, "  $scenario: $count times ($freq%)")
         end
     end
 

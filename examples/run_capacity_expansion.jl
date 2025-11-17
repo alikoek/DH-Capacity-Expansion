@@ -89,6 +89,11 @@ println()
 # Step 5: Generate outputs
 println("Step 5/5: Generating outputs...")
 
+# Save simulation results for later analysis
+println("  Saving simulation results for future analysis...")
+saved_filepath = save_simulation_results_auto(simulations, params, data; output_dir=output_dir)
+println("  Results saved to: $saved_filepath")
+
 # Print summary statistics
 print_summary_statistics(simulations, params, data)
 
@@ -111,7 +116,12 @@ println("Optimization Complete!")
 println("="^80)
 println()
 println("Output files saved to: $output_dir")
+println("  - $(basename(saved_filepath)): Complete simulation data (JLD2)")
 println("  - simulation_results.txt: Detailed simulation results")
+println("  - performance_metrics.txt: FLH, LCOH, and energy mix metrics")
 println("  - *.png: Investment and operation plots")
 println("  - spaghetti_plot.html: Interactive spaghetti plots")
+println()
+println("To analyze saved results later, run:")
+println("  julia examples/analyze_saved_results.jl $saved_filepath")
 println()
