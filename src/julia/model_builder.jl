@@ -324,8 +324,8 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             # OBJECTIVES
             #####################
             # Objective function
-            @expression(sp, Invest,  sum(U_tech[tech] * params.tech_dict[tech]["investment_cost[MSEK/MW_th]"] * 1e6 * min(1,(final_stage - stage)/(2 * params.tech_dict[tech]["lifetime_new"])) for tech in tech_type) + 
-                                     sum(U_stor[stor] * params.stor_dict[stor]["investment_cost[MSEK/MW_th]"] * 1e6 * min(1,(final_stage - stage)/(2 * params.stor_dict[stor]["lifetime_new"])) for stor in stor_type))
+            @expression(sp, Invest,  sum(U_tech[tech] * params.tech_dict[tech]["investment_cost[MSEK/MW_th]"] * 1e6 for tech in tech_type) + 
+                                     sum(U_stor[stor] * params.stor_dict[stor]["investment_cost[MSEK/MW_th]"] * 1e6 for stor in stor_type))
             
             @stageobjective(sp, df * Invest)
 
@@ -520,7 +520,16 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 for period in data.period_indexes
             ))
 
-            @stageobjective(sp, df * params.config_dict[:T_years] * (VarOpeCost + FixOpeMaint))
+            # Objective salvage
+            if stage == final_stage
+                @expression(sp, Salvage, sum(X_tech[tech,lives].out * params.tech_dict[tech]["investment_cost[MSEK/MW_th]"] * 1e6 * lives/params.tech_dict[tech]["lifetime_new"]  for lives in 1:params.tech_dict[tech]["lifetime_new"] for tech in tech_type) + 
+                                         sum(X_stor[stor,lives].out * params.stor_dict[stor]["investment_cost[MSEK/MW_th]"] * 1e6 * lives/params.stor_dict[stor]["lifetime_new"]  for lives in 1:params.stor_dict[stor]["lifetime_new"] for stor in stor_type))
+            else
+                @expression(sp, Salvage, 0)
+            end
+
+
+            @stageobjective(sp, df * (params.config_dict[:T_years] * (VarOpeCost + FixOpeMaint) + params.config_dict[:salvage_fraction] * Salvage))
             # Uncertainty definition
             # Add long-term uncertainty on demand
             # Add short-term uncertainty on demand
