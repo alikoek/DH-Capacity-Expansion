@@ -86,14 +86,15 @@ Generate all visualizations from simulation results.
 function generate_visualizations(simulations, params::ModelParameters, data::ProcessedData; output_dir="output/")
     println("Generating visualizations...")
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
-    
+    state2keys, keys2state, stage2year_phase, year_phase2stage = get_encoder_decoder(params.policy_proba_df, params.price_proba_df, params.temperature_proba_df, data.rep_years)
+
     all_stages = keys(stage2year_phase)
     inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]
     inv_years = [dept[1] for (state, dept) in stage2year_phase if dept[2] == "investment"]
     n_inv = length(inv_stages)
 
     ope_stages = [state for (state, dept) in stage2year_phase if dept[2] == "operations"]
+    inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]
 
     # 1. Investment Decisions Plot
     println("Generating investment plots...")
@@ -139,7 +140,7 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         year = Int[],
         type = String[],
         technology = String[],
-        week = Int[],
+        period = Int[],
         hour = Int[],
         value = Float64[],
     )
@@ -149,35 +150,34 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         year, phase = stage2year_phase[t]
         u_prod = simulations[sim][t][:u_production]
         x_demand_mult = simulations[sim][t][:x_demand_mult].in
-        techs, weeks, hours = axes(u_prod)
-        for tech in techs, week in weeks, hour in hours
-            push!(df_prod, (year, "Production",String(tech), week, hour, u_prod[tech, week, hour]))
+        techs, periods, hours = axes(u_prod)
+        for tech in techs, period in periods, hour in hours
+            push!(df_prod, (year, "Production",String(tech), period, hour, u_prod[tech, period, hour]))
         end
 
         u_prod = simulations[sim][t][:u_charge]
         techs, _, _ = axes(u_prod)
-        for tech in techs, week in weeks, hour in hours
-            push!(df_prod, (year, "Charge", String(tech), week, hour, u_prod[tech, week, hour]))
+        for tech in techs, period in periods, hour in hours
+            push!(df_prod, (year, "Charge", String(tech), period, hour, u_prod[tech, period, hour]))
         end
 
         u_prod = simulations[sim][t][:u_discharge]
         techs, _, _ = axes(u_prod)
-        for tech in techs, week in weeks, hour in hours
-            push!(df_prod, (year, "Discharge", String(tech), week, hour, u_prod[tech, week, hour]))
+        for tech in techs, period in periods, hour in hours
+            push!(df_prod, (year, "Discharge", String(tech), period, hour, u_prod[tech, period, hour]))
         end
 
         u_prod = simulations[sim][t][:u_unmet]
-        for week in weeks, hour in hours
-            push!(df_prod, (year, "Unmet", "/", week, hour, u_prod[week, hour]))
+        for period in periods, hour in hours
+            push!(df_prod, (year, "Unmet", "/", period, hour, u_prod[period, hour]))
         end
 
-        for week in weeks, hour in hours
-            dem = x_demand_mult * first(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "hour"] .== hour)  .& (data.weeks[!, "year"] .== (year))  .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"])
-            push!(df_prod, (year, "Demand", "/", week, hour, dem))
+        for period in periods, hour in hours
+            dem = x_demand_mult * first(data.periods[(data.periods[!, "period"] .== period) .& (data.periods[!, "hour"] .== hour)  .& (data.periods[!, "year"] .== (year))  .& (data.periods[!, "scenario_price"] .== price), "Load Profile"])
+            push!(df_prod, (year, "Demand", "/", period, hour, dem))
         end
         
     end
-    show(df_prod)
     CSV.write(joinpath(output_dir, "operational_sim1.csv"), df_prod)
 
     df_ope_overview = DataFrame(
@@ -185,6 +185,7 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         
         policy = String[],
         price = String[],
+        temperature = String[],
         prev_policy = String[],
         prev_price = String[],
 
@@ -204,6 +205,7 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         
         policy = String[],
         price = String[],
+        temperature = String[],
         prev_policy = String[],
         prev_price = String[],
 
@@ -218,24 +220,65 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         # cost = Float64[]
     )
 
+    df_expansion_overview = DataFrame(
+        year = Int[],
+        stage = Int[],
+        
+        policy = String[],
+        price = String[],
+        temperature = String[],
+        prev_policy = String[],
+        prev_price = String[],
+
+        demand_mult = Float64[],
+        prev_demand_mult = Float64[],
+        
+        simulation = Int[],
+        technology = String[],
+        
+        expansion = Float64[]
+        # CO2 = Float64[],
+        # cost = Float64[]
+    )
+
+    df_objective_overview = DataFrame(
+        year = Int[],
+        phase = String[],
+        
+        policy = String[],
+        price = String[],
+        temperature = String[],
+        prev_policy = String[],
+        prev_price = String[],
+
+        demand_mult = Float64[],
+        prev_demand_mult = Float64[],
+        
+        simulation = Int[],
+        
+        objective = Float64[]
+        # CO2 = Float64[],
+        # cost = Float64[]
+    )
     for (index_sim,sim) in enumerate(simulations)
         prev_policy, prev_price = "/","/"
         prev_demand_mult = 1.0
-        for t in ope_stages
+        for t in inv_stages
             state = sim[t][:node_index][2]
-            policy, price = state2keys[state]
+            policy, price, temperature = state2keys[state]
             year, phase = stage2year_phase[t]
             X_tech = sim[t][:X_tech]
             x_demand_mult = sim[t][:x_demand_mult].in
             
 
-
             # techs, lives = axes(X_tech)
             for tech in keys(params.tech_dict)
-                installed = sum(X_tech[tech,lives].in for lives in params.tech_dict[tech]["lifetime_new"])
+                installed = sum(X_tech[tech,lives].out for lives in 1:params.tech_dict[tech]["lifetime_new"])
                 push!(df_design_overview, (year, 
                                 policy,
                                 price, 
+
+                                temperature,
                                 prev_policy,
                                 prev_price,
                                 
@@ -247,6 +290,25 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
 
                                 installed,
                                 ))
+
+                push!(df_expansion_overview, (year, 
+                                t,
+                                policy,
+                                price, 
+
+                                temperature,
+                                prev_policy,
+                                prev_price,
+                                
+                                x_demand_mult,
+                                prev_demand_mult,
+
+                                Int(index_sim),
+                                string(tech),
+
+                                sim[t][:U_tech][tech],
+                                ))
+                
             end
             prev_policy, prev_price = policy, price
             prev_demand_mult = x_demand_mult
@@ -254,31 +316,68 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         end
 
     end
-    show(df_design_overview)
     CSV.write(joinpath(output_dir, "design_overview.csv"), df_design_overview)
+    CSV.write(joinpath(output_dir, "expansion_overview.csv"), df_expansion_overview)
 
+    for (index_sim,sim) in enumerate(simulations)
+        prev_policy, prev_price = "/","/"
+        prev_demand_mult = 1.0
+        for t in [state for (state, dept) in stage2year_phase]
+            state = sim[t][:node_index][2]
+            policy, price, temperature = state2keys[state]
+            year, phase = stage2year_phase[t]
+            stage_objective = sim[t][:stage_objective]
+            x_demand_mult = sim[t][:x_demand_mult].in
+            
+            # for tech in keys(params.tech_dict)
+            push!(df_objective_overview, (year, 
+                            phase, 
+                            policy,
+                            price, 
+
+                            temperature,
+                            prev_policy,
+                            prev_price,
+                            
+                            x_demand_mult,
+                            prev_demand_mult,
+
+                            Int(index_sim),
+                            stage_objective
+                            ))
+
+                
+            # end
+            prev_policy, prev_price = policy, price
+            prev_demand_mult = x_demand_mult
+
+        end
+
+    end
+    CSV.write(joinpath(output_dir, "objective_overview.csv"), df_objective_overview)
 
     for (index_sim,sim) in enumerate(simulations)
         prev_policy, prev_price = "/","/"
         prev_demand_mult = 1.0
         for t in ope_stages
             state = sim[t][:node_index][2]
-            policy, price = state2keys[state]
+            policy, price, temperature = state2keys[state]
             year, phase = stage2year_phase[t]
             u_prod = sim[t][:u_production]
             x_demand_mult = sim[t][:x_demand_mult].in
             
 
 
-            techs, weeks, hours = axes(u_prod)
+            techs, periods, hours = axes(u_prod)
             for tech in techs
-                prod = sum(u_prod[tech, week, hour] * 
-                            first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) 
-                            for week in weeks, hour in hours
+                prod = sum(u_prod[tech, period, hour] * 
+                            first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) 
+                            for period in periods, hour in hours
                             )
                 push!(df_ope_overview, (year, 
                                 policy,
                                 price, 
+                                temperature,
                                 prev_policy,
                                 prev_price,
                                 
@@ -293,13 +392,14 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
             end
     
             u_prod = sim[t][:u_unmet]
-            prod = sum(u_prod[week, hour] * 
-                first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) 
-                for week in weeks, hour in hours
+            prod = sum(u_prod[period, hour] * 
+                first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) 
+                for period in periods, hour in hours
                 )
             push!(df_ope_overview, (year, 
                             policy,
                             price, 
+                            temperature,
                             prev_policy,
                             prev_price,
                             
@@ -318,25 +418,24 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
         end
 
     end
-    show(df_ope_overview)
     CSV.write(joinpath(output_dir, "operational_overview.csv"), df_ope_overview)
 
 
             # u_prod = simulations[sim][t][:u_charge]
             # techs, _, _ = axes(u_prod)
-            # for tech in techs, week in weeks, hour in hours
-            #     push!(df_prod, (year, "Charge", String(tech), week, hour, u_prod[tech, week, hour]))
+            # for tech in techs, period in periods, hour in hours
+            #     push!(df_prod, (year, "Charge", String(tech), period, hour, u_prod[tech, period, hour]))
             # end
     
             # u_prod = simulations[sim][t][:u_discharge]
             # techs, _, _ = axes(u_prod)
-            # for tech in techs, week in weeks, hour in hours
-            #     push!(df_prod, (year, "Discharge", String(tech), week, hour, u_prod[tech, week, hour]))
+            # for tech in techs, period in periods, hour in hours
+            #     push!(df_prod, (year, "Discharge", String(tech), period, hour, u_prod[tech, period, hour]))
             # end
     
             # u_prod = simulations[sim][t][:u_unmet]
-            # for week in weeks, hour in hours
-            #     push!(df_prod, (year, "Unmet", "/", week, hour, u_prod[week, hour]))
+            # for period in periods, hour in hours
+            #     push!(df_prod, (year, "Unmet", "/", period, hour, u_prod[period, hour]))
             # end
     
             
@@ -345,8 +444,8 @@ end
     # # 3. Load Duration Curve for Sample Simulation
     # println("Generating load duration curves...")
 
-    # # Calculate total hours across all weeks for visualization
-    # total_viz_hours = data.n_weeks * data.hours_per_week
+    # # Calculate total hours across all periods for visualization
+    # total_viz_hours = data.n_periods * data.hours_per_period
 
     # # For each operational stage
     # for t_year in 1:params.T
@@ -358,9 +457,9 @@ end
 
     #     for (tech_idx, tech) in enumerate(params.technologies)
     #         hour_idx = 1
-    #         for week in 1:data.n_weeks
-    #             for hour in 1:data.hours_per_week
-    #                 y_data[hour_idx, tech_idx] = value(sp[:u_production][tech, week, hour])
+    #         for period in 1:data.n_periods
+    #             for hour in 1:data.hours_per_period
+    #                 y_data[hour_idx, tech_idx] = value(sp[:u_production][tech, period, hour])
     #                 hour_idx += 1
     #             end
     #         end
@@ -368,9 +467,9 @@ end
 
     #     # Add storage discharge
     #     hour_idx = 1
-    #     for week in 1:data.n_weeks
-    #         for hour in 1:data.hours_per_week
-    #             y_data[hour_idx, length(params.technologies) + 1] = value(sp[:u_discharge][week, hour])
+    #     for period in 1:data.n_periods
+    #         for hour in 1:data.hours_per_period
+    #             y_data[hour_idx, length(params.technologies) + 1] = value(sp[:u_discharge][period, hour])
     #             hour_idx += 1
     #         end
     #     end
@@ -413,12 +512,12 @@ end
 
     #     for (ope_stage, stage) in enumerate(2:2:2*params.T)
     #         for sim in 1:length(simulations)
-    #             # Sum production across all weeks and hours, weighted by week occurrence
+    #             # Sum production across all periods and hours, weighted by period occurrence
     #             total_prod = 0.0
-    #             for week in 1:data.n_weeks
-    #                 week_prod = sum(value(simulations[sim][stage][:u_production][tech, week, hour])
-    #                                for hour in 1:data.hours_per_week)
-    #                 total_prod += week_prod * data.week_weights_normalized[week]
+    #             for period in 1:data.n_periods
+    #                 period_prod = sum(value(simulations[sim][stage][:u_production][tech, period, hour])
+    #                                for hour in 1:data.hours_per_period)
+    #                 total_prod += period_prod * data.period_weights_normalized[period]
     #             end
     #             ope_var_prod[sim, ope_stage] = total_prod
     #         end
@@ -435,12 +534,12 @@ end
 
     # for (ope_stage, stage) in enumerate(2:2:2*params.T)
     #     for sim in 1:length(simulations)
-    #         # Sum storage discharge across all weeks and hours, weighted
+    #         # Sum storage discharge across all periods and hours, weighted
     #         total_discharge = 0.0
-    #         for week in 1:data.n_weeks
-    #             week_discharge = sum(value(simulations[sim][stage][:u_discharge][week, hour])
-    #                                for hour in 1:data.hours_per_week)
-    #             total_discharge += week_discharge * data.week_weights_normalized[week]
+    #         for period in 1:data.n_periods
+    #             period_discharge = sum(value(simulations[sim][stage][:u_discharge][period, hour])
+    #                                for hour in 1:data.hours_per_period)
+    #             total_discharge += period_discharge * data.period_weights_normalized[period]
     #         end
     #         ope_var_storage[sim, ope_stage] = total_discharge
     #     end
@@ -462,10 +561,10 @@ end
     #     end
     #     println(data)
     #     SDDP.add_spaghetti(plt; title="Production_$tech") do data2
-    #         # Sum across all weeks and hours
+    #         # Sum across all periods and hours
     #         total = 0.0
-    #         for week in 1:data.n_weeks
-    #             total += sum(data2[:u_production][tech, week, :])  * data.week_weights_normalized[week]
+    #         for period in 1:data.n_periods
+    #             total += sum(data2[:u_production][tech, period, :])  * data.period_weights_normalized[period]
     #         end
     #         return total
     #     end
@@ -477,8 +576,8 @@ end
 
     # SDDP.add_spaghetti(plt; title="Storage_Discharge") do data2
     #     total = 0.0
-    #     for week in 1:data.n_weeks
-    #         total += sum(data2[:u_discharge][week, :]) * data.week_weights_normalized[week]
+    #     for period in 1:data.n_periods
+    #         total += sum(data2[:u_discharge][period, :]) * data.period_weights_normalized[period]
     #     end
     #     return total
     # end
@@ -489,8 +588,8 @@ end
 
     # SDDP.add_spaghetti(plt; title="Unmet_Demand") do data2
     #     total = 0.0
-    #     for week in 1:data.n_weeks
-    #         total += sum(data2[:u_unmet][week, :]) * data.week_weights_normalized[week]
+    #     for period in 1:data.n_periods
+    #         total += sum(data2[:u_unmet][period, :]) * data.period_weights_normalized[period]
     #     end
     #     return total
     # end

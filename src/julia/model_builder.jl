@@ -4,6 +4,9 @@ SDDP model construction for District Heating Capacity Expansion
 
 using SDDP, Gurobi, LinearAlgebra, Distributions
 
+using Plots
+using ColorSchemes
+
 include("helper_functions.jl")
 
 """
@@ -17,68 +20,79 @@ Build Markovian transition matrices for the policy graph.
 # Returns
 - Vector of transition matrices
 """
-# function build_transition_matrices(T::Int)
-#     I = Diagonal(ones(3))
-#     transition_matrices = Array{Float64,2}[
-#         [1.0]',
-#         [1.0]',
-#         [0.3 0.5 0.2],
-#         I,
-#         [0.3 0.5 0.2; 0.3 0.5 0.2; 0.3 0.5 0.2],
-#         I,
-#         [0.3 0.5 0.2; 0.3 0.5 0.2; 0.3 0.5 0.2],
-#         I,
-#     ]
-#     return transition_matrices
-# end
 
-function build_transition_matrices_new(stage2year_phase, state2keys, keys2state, p_policy, p_price)
-    n_stages = length(state2keys)
-    # Create a 2x2 array of zeros
-    println("hello")
+function build_transition_matrices_new(stage2year_phase, state2keys, keys2state, p_policy, p_price, p_temperature)
+    start_price = "mid"
+    start_policy = "usual"
+    start_temperature = "highT"
+    n_states = length(state2keys)
+    
+    branch_temperature = (stage) -> stage == 1
+    branch_carbon = (stage) -> stage == 3
+    branch_price = (stage) -> stage2year_phase[stage][2] == "operations"
 
-    B = zeros(n_stages)
-    for i in 1:n_stages    # rows
-        policy1, price1 = state2keys[i]
-        if price1 == "mid"
-            B[i] = p_policy[p_policy.policy .== policy1, :probability][1]
+    # Start Matrix: creating 18 and pointing towards the right stage
+    # Matrix to temperature
+    A1 = zeros(n_states)
+    stage = 1
+    for state2 in 1:n_states
+        policy2, price2, temperature2 = state2keys[state2]
+        if branch_temperature(stage)
+            p1 = p_temperature[p_temperature.temp .== temperature2, :probability][1]
+        else
+            p1 = start_temperature == temperature2
         end
+
+        if branch_carbon(stage)
+            p2 = p_policy[p_policy.policy .== policy2, :probability][1]
+        else
+            p2 = start_policy == policy2
+        end
+        
+        if branch_price(stage)
+            p3 = p_price[p_price.price .== start_price, price2][1]
+        else
+            p3 = start_price == price2
+        end
+        A1[state2] = p1 * p2 * p3
     end
 
-    # Matrix 9 stages on 9 stages - from investment to 
-    A = zeros(n_stages, n_stages)
-    for i in 1:size(A, 1)    # rows
-        for j in 1:size(A, 2)    # columns
-            policy1, price1 = state2keys[i]
-            policy2, price2 = state2keys[j]
+    function create_matrix(stage)
+        C = zeros(n_states,n_states)
+        for state1 in 1:n_states
+            for state2 in 1:n_states
+                policy1, price1, temperature1 = state2keys[state1]
+                policy2, price2, temperature2 = state2keys[state2]
+                if branch_temperature(stage)
+                    p1 = p_temperature[p_temperature.temp .== temperature2, :probability][1]
+                else
+                    p1 = temperature1 == temperature2
+                end
 
-            if policy1 != policy2
-                A[i,j] = 0
-            else
-                price_proba = p_price[p_price[!, "price"] .== price1, price2] 
-                A[i, j] =  first(price_proba)
+                if branch_carbon(stage)
+                    p2 = p_policy[p_policy.policy .== policy2, :probability][1]
+                else
+                    p2 = policy1 == policy2
+                end
+                
+                if branch_price(stage)
+                    p3 = p_price[p_price.price .== price1, price2][1]
+                else
+                    p3 = price1 == price2
+                end
+                
+                C[state1,state2] = p1 * p2 * p3
             end
         end
+        return C
     end
     
-    I = Diagonal(ones(n_stages))
-    
     transition_matrices = Array{Float64,2}[]
-    for i in 1:length(stage2year_phase)
-        year, phase = stage2year_phase[i]
-        
-        if i == 1
-            push!(transition_matrices, [1.0]')
-        elseif i == 2
-            push!(transition_matrices, [1.0]')
-        elseif i == 3
-            push!(transition_matrices, B')
-        elseif i == 4
-            push!(transition_matrices, A)
-        elseif phase == "investment"
-            push!(transition_matrices, I)
+    for stage in 1:length(stage2year_phase)
+        if stage == 1
+            push!(transition_matrices, A1')
         else
-            push!(transition_matrices, A)
+            push!(transition_matrices, create_matrix(stage))
         end
     end
     # for matrix in transition_matrices
@@ -87,7 +101,83 @@ function build_transition_matrices_new(stage2year_phase, state2keys, keys2state,
     #         println(row)
     #     end
     # end
+    p = plot_adjacency_matrices(transition_matrices, state2keys,stage2year_phase)
+    display(p)
     return transition_matrices
+end
+
+
+"""
+plot_adjacency_matrices(model, state2keys)
+
+`model`      :: Vector{Matrix{Float64}}  (adjacency matrices stage→stage+1)
+`state2keys` :: OrderedDict{Int,(policy, price, temperature)}
+"""
+function plot_adjacency_matrices(model::Vector{Matrix{Float64}}, state2keys,stage2year_phase)
+
+    n_stages = length(model)
+    p = plot(size=(1200, 800), legend=false,
+             xlim=(0, n_stages), ylim=(0, maximum(size.(model,1)) + 1))
+
+    title!("Adjacency Matrix Flow Between Stages")
+    xlabel!("Stage")
+    ylabel!("Node index")
+
+    # --- Visual encoding dictionaries ---
+    T_colors = Dict("highT" => "red", "lowT" => "blue")
+
+    prices = ["low", "mid", "high"]
+    price_color = Dict("low" => "yellow", "mid" => "pink", "high" => "purple")
+
+    policies = ["weak", "usual", "strong"]
+    shapes = Dict("weak" => :square, "usual" => :pentagon, "strong" => :hexagon)
+
+    # --- 1. Draw transitions (arrows) ---
+    for stage in 1:(n_stages-1)
+        mat = model[stage]
+        n_rows, n_cols = size(mat)
+
+        for i in 1:n_rows
+            for j in 1:n_cols
+                value = mat[i,j]
+                if value > 0
+                    grey = RGB((1-value)^2, (1-value)^2, (1-value)^4)
+
+                    plot!([stage-1, stage], [i, j],
+                          arrow=true,
+                          color=grey,
+                          linewidth=1.5 * value)
+                end
+            end
+        end
+    end
+
+    # --- 2. Scatter nodes based on state2keys ---
+    
+    for stage in 1:n_stages
+        n_nodes = size(model[stage], 1)
+        idx = 1
+        for local_idx in 1:n_nodes
+            policy, price, temp = state2keys[idx]
+            scatter!([stage-1], [local_idx];
+                markersize=9,
+                markershape=get(shapes, policy, :circle),
+                color=get(price_color, price, :black),
+                markerstrokecolor=get(T_colors, temp, :black),
+                markerstrokewidth=2
+            )
+
+            idx += 1
+        end
+    end
+
+    # --- Stage labels ---
+    for stage in 1:(n_stages)
+        year,phase = stage2year_phase[stage]
+        annotate!(stage-1, 0.0, text("$year \n $phase", 6, :center, :bottom))
+    end
+
+    return p
 end
 
 """
@@ -124,33 +214,6 @@ function build_distribution(errors)
     # return price_values, price_probabilities_normalized
 end
 
-function build_dictionnaries(policies_transition, prices_transition, rep_years)
-    state2keys = Dict()
-    keys2state = Dict()
-    i = 0
-    for policy in eachrow(policies_transition)
-        nest = Dict()
-        for price in eachrow(prices_transition)  # Fixed: use prices_transition
-            nest[price["price"]] = i
-            i = i+1
-            state2keys[i] = (policy["policy"], price["price"])
-        end
-        keys2state[policy["policy"]] = copy(nest)
-    end
-    i = 1
-    stage2year_phase = Dict()
-    year_phase2stage = Dict()
-    for i in 1:length(rep_years)
-        year = rep_years[i]
-        stage2year_phase[2*i-1] = (year,"investment")
-        stage2year_phase[2*i] = (year,"operations")
-
-        year_phase2stage[year,"investment"] = 2*i-1
-        year_phase2stage[year,"operations"] = 2*i
-    end
-    return sort(state2keys), sort(keys2state), sort(stage2year_phase), sort(year_phase2stage)
-end
-
 """
     build_sddp_model(params::ModelParameters, data::ProcessedData)
 
@@ -166,34 +229,35 @@ Build the SDDP model for capacity expansion optimization.
 function build_sddp_model(params::ModelParameters, data::ProcessedData)
     println("Building SDDP model...")
     println("  Using $(length(data.rep_years)) typical years")
-    println("  Using $(length(data.week_indexes)) typical weeks per year")
-    println("  Using $(length(data.hour_indexes)) typical hours per week")
+    println("  Using $(length(data.period_indexes)) typical periods per year")
+    println("  Using $(length(data.hour_indexes)) typical hours per period")
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
+    state2keys, keys2state, stage2year_phase, year_phase2stage = get_encoder_decoder(params.policy_proba_df, params.price_proba_df, params.temperature_proba_df, data.rep_years)
 
     # Build transition matrices and price distribution
-    transition_matrices = build_transition_matrices_new(stage2year_phase, state2keys, keys2state, params.policy_proba_df, params.price_proba_df)
+    transition_matrices = build_transition_matrices_new(stage2year_phase, state2keys, keys2state, params.policy_proba_df, params.price_proba_df, params.temperature_proba_df)
     error_distribution = build_distribution(data.errors)
     
     tech_type = keys(params.tech_dict)
     stor_type = keys(params.stor_dict)
 
-
-    stor_initial = Dict((stor, lives) => 0 
+    stor_initial = Dict((stor, lives) => 0.0 
                for stor in stor_type 
                for lives in 1:(params.stor_dict[stor]["lifetime_new"] + 1))
 
-    tech_initial = Dict((tech, lives) => 0 
+    tech_initial = Dict((tech, lives) => 0.0 
         for tech in tech_type 
         for lives in 1:(params.tech_dict[tech]["lifetime_new"] + 1))
     
+    for row in eachrow(params.existing_capa_df)
+        tech = Symbol(row.technology)
+        lives = row.lives
+        capacity = row.capacity
+        tech_initial[tech, lives] = capacity
+    end
 
     for (key, value) in params.stor_dict
         stor_initial[key,value["lifetime_initial"]] = value["initial_capacity[MW_th]"]
-    end
-
-    for (key, value) in params.tech_dict
-        tech_initial[key,value["lifetime_initial"]] = value["initial_capacity[MW_th]"]
     end
 
     model = SDDP.MarkovianPolicyGraph(
@@ -205,10 +269,9 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         # Elementary information
         stage, state = node
         year, phase = stage2year_phase[stage]
-        if stage <= 3
+        policy, price, temperature = state2keys[state]
+        if stage <= 2
             policy, price = "usual", "mid"
-        else
-            policy, price = state2keys[state]
         end
 
         # to remove
@@ -274,12 +337,11 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             # VARIABLES
             #####################
             @variables(sp, begin
-                0 <= u_production[tech in tech_type, week in data.week_indexes, hour in data.hour_indexes]
-                0 <= u_charge[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes]
-                0 <= u_discharge[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes]
-                0 <= u_level[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes]
-
-                0 <= u_unmet[week in data.week_indexes, hour in data.hour_indexes]
+                0 <= u_production[tech in tech_type, period in data.period_indexes, hour in data.hour_indexes]
+                0 <= u_charge[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes]
+                0 <= u_discharge[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes]
+                0 <= u_level[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes]
+                0 <= u_unmet[period in data.period_indexes, hour in data.hour_indexes]
             end)
 
             ##################### 
@@ -294,45 +356,80 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             
 
             # constraint meeting demand - add demand multiplier
-            demand = (week, hour, year, price) -> begin
-                local df = data.weeks
-                row_mask = (df[!, "typical_week"] .== week) .& 
+            demand = (period, hour, year, price) -> begin
+                local df = data.periods
+                row_mask = (df[!, "period"] .== period) .& 
                         (df[!, "hour"] .== hour) .& 
                         (df[!, "year"] .== year) .& 
                         (df[!, "scenario_price"] .== price)
                 local matching_rows = df[row_mask, "Load Profile"]
-                isempty(matching_rows) && error("No demand data found for week=$week, hour=$hour, year=$year, price=$price")
+                isempty(matching_rows) && error("No demand data found for period=$period, hour=$hour, year=$year, price=$price")
                 return matching_rows[1]
             end
-            @constraint(sp, Demand[week in data.week_indexes, hour in data.hour_indexes], 
-                            sum(u_production[tech, week, hour] for tech in tech_type)
-                          + sum(u_discharge[stor, week, hour] for stor in stor_type)
-                          + u_unmet[week,hour]
-                         == sum(u_charge[stor, week, hour]/params.stor_dict[stor]["efficiency_th"] for stor in stor_type)
-                          + x_demand_mult.in * demand(week, hour, year, price))
+            @constraint(sp, Demand[period in data.period_indexes, hour in data.hour_indexes], 
+                            sum(u_production[tech, period, hour] for tech in tech_type)
+                          + sum(u_discharge[stor, period, hour] for stor in stor_type)
+                          + u_unmet[period,hour]
+                         == sum(u_charge[stor, period, hour]/params.stor_dict[stor]["efficiency_th"] for stor in stor_type)
+                          + x_demand_mult.in * demand(period, hour, year, price))
 
             # constraint storage balance
-            @constraint(sp, StorageBal[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes],
-                            (1 - params.stor_dict[stor]["loss_rate"]) * u_level[stor, week, hour]
-                          + u_charge[stor, week, hour] 
-                          - u_discharge[stor, week, hour] 
-                         == u_level[stor, week, mod(hour+1, length(data.hour_indexes))])
+            @constraint(sp, StorageBal[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes],
+                            (1 - params.stor_dict[stor]["loss_rate"]) * u_level[stor, period, hour]
+                          + u_charge[stor, period, hour] 
+                          - u_discharge[stor, period, hour] 
+                         == u_level[stor, period, mod(hour+1, length(data.hour_indexes))])
             
             # constraint storage balance
-            @constraint(sp, StorageCap[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes],
-                        u_level[stor, week, hour] <= sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
+            @constraint(sp, StorageCap[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes],
+                        u_level[stor, period, hour] <= sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
             
             # constraint storage discharge
-            @constraint(sp, BoundDischarge[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes],
-                            u_discharge[stor, week, hour] <=  params.stor_dict[stor]["max_discharge_rate"] * sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
-            # constraint storage charge
-            @constraint(sp, BoundCharge[stor in stor_type, week in data.week_indexes, hour in data.hour_indexes],
-                            u_charge[stor, week, hour] <=  params.stor_dict[stor]["max_charge_rate"] * sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
+            @constraint(sp, BoundDischarge[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes],
+                            u_discharge[stor, period, hour] <=  params.stor_dict[stor]["max_discharge_rate"] * sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
+            
+                            # constraint storage charge
+            @constraint(sp, BoundCharge[stor in stor_type, period in data.period_indexes, hour in data.hour_indexes],
+                            u_charge[stor, period, hour] <=  params.stor_dict[stor]["max_charge_rate"] * sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]))
 
             # constraint tech power
-            @constraint(sp, BoundProd[tech in tech_type, week in data.week_indexes, hour in data.hour_indexes],
-                            u_production[tech, week, hour] <= sum(X_tech[tech,lives].in for lives in 1:params.tech_dict[tech]["lifetime_new"]))
-
+            @constraint(sp, BoundProd[tech in tech_type, period in data.period_indexes, hour in data.hour_indexes],
+                            u_production[tech, period, hour] <= sum(X_tech[tech,lives].in for lives in 1:params.tech_dict[tech]["lifetime_new"]))
+            
+            
+            # constraint - waste availability (only for carriers with limits)
+            for carrier in String.(keys(params.carrier_dict))
+                limitation_rows = params.limit_ressource_df[
+                    (params.limit_ressource_df[!, "carrier"] .== carrier) .&
+                    (params.limit_ressource_df[!, "year"] .== year),
+                    "limitation"
+                ]
+                
+                if !isempty(limitation_rows)
+                    @constraint(sp, 
+                        sum(
+                            first(data.period_weights[
+                                (data.period_weights[!, "year"] .== year) .& 
+                                (data.period_weights[!, "scenario_price"] .== price), 
+                                string(period)
+                            ]) *
+                            u_production[tech, period, hour] / 
+                            first(
+                                params.temperature_efficiency_df[
+                                    (params.temperature_efficiency_df[!, "technology"] .== string(tech)) .&
+                                    (params.temperature_efficiency_df[!, "temperature"] .== temperature) .&
+                                    (params.temperature_efficiency_df[!, "year"] .== year),
+                                    "efficiency"
+                                ]
+                            )
+                            for period in data.period_indexes 
+                            for hour in data.hour_indexes
+                            for tech in keys(params.tech_dict) if params.tech_dict[tech]["energy_carrier"] == carrier
+                        ) <= first(limitation_rows)
+                    )
+                end
+                # No constraint created if no limitation exists (effectively unbounded)
+            end
 
             ##################### 
             # OBJECTIVES
@@ -342,15 +439,15 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                                         + sum(params.stor_dict[stor]["fixed_om[MSEK/MW_th]"] * 1e6 * sum(X_stor[stor,lives].in for lives in 1:params.stor_dict[stor]["lifetime_new"]) for stor in stor_type)))
             
             # Cost of primary resources
-            dyn_cost = (carrier, week, hour) -> begin
+            dyn_cost = (carrier, period, hour) -> begin
                 if carrier == "elec"
-                    local df = data.weeks
-                    row_mask = (df[!, "typical_week"] .== week) .& 
+                    local df = data.periods
+                    row_mask = (df[!, "period"] .== period) .& 
                                 (df[!, "hour"] .== hour) .& 
                                 (df[!, "year"] .== year) .& 
                                 (df[!, "scenario_price"] .== price)
                     if sum(row_mask) == 0
-                        error("No electricity price found for week=$week, hour=$hour, year=$year")
+                        error("No electricity price found for period=$period, hour=$hour, year=$year")
                     end
                     return df[row_mask, "price"][1]
                 else
@@ -374,29 +471,53 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     params.carrier_dict[Symbol(carrier)]["emission_factor"]
                 end
             end
+
             # technology primary cost
-            @expression(sp, TechOpeCost[week in data.week_indexes], sum( dyn_cost(params.tech_dict[tech]["energy_carrier"],week,hour) * u_production[tech, week, hour] / params.tech_dict[tech]["efficiency_th"] for tech in tech_type for hour in data.hour_indexes))
+            @expression(sp, TechOpeCost[period in data.period_indexes], 
+                sum( 
+                    dyn_cost(params.tech_dict[tech]["energy_carrier"], period, hour) * 
+                    u_production[tech, period, hour] / 
+                    first(
+                        params.temperature_efficiency_df[
+                            (params.temperature_efficiency_df[!, "technology"] .== string(tech)) .&
+                            (params.temperature_efficiency_df[!, "temperature"] .== temperature) .&
+                            (params.temperature_efficiency_df[!, "year"] .== year),
+                            "efficiency"
+                        ]
+                    )
+                    for tech in tech_type 
+                    for hour in data.hour_indexes
+                )
+            )
 
-            # revenue primary cost - divided by two because it
-            @expression(sp, TechOpeRev[week in data.week_indexes],  sum( dyn_cost("elec",week,hour) * u_production[tech, week, hour] / params.tech_dict[tech]["efficiency_th"] * params.tech_dict[tech]["efficiency_el"] / 2 for tech in tech_type for hour in data.hour_indexes))
-
+            # revenue primary cost - divided by two because it makes more sense (Transport & Distribution fees)
+            @expression(sp, TechOpeRev[period in data.period_indexes], 
+                sum( 
+                    dyn_cost("elec",period,hour) / 2 * 
+                    u_production[tech, period, hour] * 
+                    params.tech_dict[tech]["efficiency_el"] / params.tech_dict[tech]["efficiency_th"]
+                    for tech in tech_type 
+                    for hour in data.hour_indexes
+                )
+            )
+            
             # technology variable operation and maintenance cost
-            @expression(sp, VarTechOM[week in data.week_indexes], sum( params.tech_dict[tech]["variable_om[SEK/MWh_th]"] * u_production[tech, week, hour] for tech in tech_type for hour in data.hour_indexes))
-            @expression(sp, VarStorOM[week in data.week_indexes], sum( params.stor_dict[stor]["variable_om[SEK/MWh_th]"] * u_discharge[stor, week, hour] for stor in stor_type for hour in data.hour_indexes))
+            @expression(sp, VarTechOM[period in data.period_indexes], sum( params.tech_dict[tech]["variable_om[SEK/MWh_th]"] * u_production[tech, period, hour] for tech in tech_type for hour in data.hour_indexes))
+            @expression(sp, VarStorOM[period in data.period_indexes], sum( params.stor_dict[stor]["variable_om[SEK/MWh_th]"] * u_discharge[stor, period, hour] for stor in stor_type for hour in data.hour_indexes))
 
             # CO2 cost
             local carbon_price = first(params.carbon_df[(params.carbon_df[!,"policy"] .== policy) .& (params.carbon_df[!,"year"] .== year),"CO2tax"])
-            @expression(sp, CO2ope[week in data.week_indexes], sum( dyn_CO2((params.tech_dict[tech]["energy_carrier"]), year) * carbon_price * u_production[tech, week, hour] / params.tech_dict[tech]["efficiency_th"] for tech in tech_type for hour in data.hour_indexes))
+            @expression(sp, CO2ope[period in data.period_indexes], sum( dyn_CO2((params.tech_dict[tech]["energy_carrier"]), year) * carbon_price * u_production[tech, period, hour] / params.tech_dict[tech]["efficiency_th"] for tech in tech_type for hour in data.hour_indexes))
             
             # Unmet demand
-            @expression(sp, UnmetCost[week in data.week_indexes], sum(params.config_dict[:c_penalty] * u_unmet[week, hour] for hour in data.hour_indexes))
+            @expression(sp, UnmetCost[period in data.period_indexes], sum(params.config_dict[:c_penalty] * u_unmet[period, hour] for hour in data.hour_indexes))
 
             # Objective function
             @expression(sp, VarOpeCost, 
                 sum(
-                first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) * 
-                (UnmetCost[week] + TechOpeCost[week] - TechOpeRev[week] + VarTechOM[week] + VarStorOM[week] + CO2ope[week]) 
-                for week in data.week_indexes
+                first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) * 
+                (UnmetCost[period] + TechOpeCost[period] - TechOpeRev[period] + VarTechOM[period] + VarStorOM[period] + CO2ope[period]) 
+                for period in data.period_indexes
             ))
 
             @stageobjective(sp, df * params.config_dict[:T_years] * (VarOpeCost + FixOpeMaint))
@@ -414,3 +535,4 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
 
     return model
 end
+

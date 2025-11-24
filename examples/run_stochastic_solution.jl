@@ -9,7 +9,8 @@ capacity expansion optimization with representative weeks and storage.
 using Revise
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "src", "julia"))
 using DHCapEx
-
+using Plots
+using SparseArrays
 ##
 ##############################################################################
 # Configuration
@@ -18,15 +19,14 @@ using DHCapEx
 # Define paths
 project_dir = dirname(@__DIR__)
 data_dir = joinpath(project_dir, "data")
-print(data_dir)
 output_dir = joinpath(project_dir, "output")
 excel_file = joinpath(data_dir, "model_parameters.xlsx")
 
 # Simulation settings
-ITERATION_LIMIT = 300        # Number of SDDP training iterations
+ITERATION_LIMIT = 1000        # Number of SDDP training iterations
 N_SIMULATIONS = 1000          # Number of Monte Carlo simulations
 RANDOM_SEED = 1234          # Random seed for reproducibility
-RISK_MEASURE = :CVaR        # Risk measure: :CVaR, :Expectation, or :WorstCase
+RISK_MEASURE = :Expectation        # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95           # CVaR confidence level (if using CVaR)
 
 ##
@@ -34,29 +34,30 @@ CVAR_ALPHA = 0.95           # CVaR confidence level (if using CVaR)
 # Main Execution
 ##############################################################################
 
-println("="^80)
-println("District Heating Capacity Expansion Optimization")
-println("="^80)
-println()
+##
+##################################################################
+# SDDP execution: getting the value of the stochastic solution VSS
+##################################################################
+println("======================")
+println("STOCHASTIC PROBLEM")
+println("======================")
 
 # Step 1: Load parameters from Excel
 println("Step 1/6: Loading parameters from Excel...")
 params = load_parameters(excel_file)
 println("  Loaded parameters for $(length(params.technologies)) technologies")
 println("  Planning horizon: $(params.config_dict[:T]) model years ($(params.config_dict[:T] * params.config_dict[:T_years]) actual years)")
-println()
+println("  # policy: $(size(params.policy_proba_df,1)) policy scenarios")
+println("  # price: $(size(params.price_proba_df,1)) price scenarios")
+println("  # temperature: $(size(params.temperature_proba_df,1)) temperature scenarios")
 
-println(data_dir)
 # Step 2: Load and process data
 println("Step 2/6: Loading and processing data...")
 data = load_all_data(data_dir)
 
 # small modifications
-# params.config_dict[:T_years] = data.rep_years[2] - data.rep_years[1]
-
-println("  Loaded $(maximum(data.week_indexes)) representative weeks")
+println("  Loaded $(length(data.period_indexes)) representative periods of $(length(data.hour_indexes)) timesteps")
 println()
-
 
 # Step 3: Build SDDP model
 println("Step 3/6: Building SDDP model...")
@@ -84,9 +85,10 @@ end
 simulations = train_model(
     model;
     risk_measure=risk_measure,
-    iteration_limit=ITERATION_LIMIT
+    iteration_limit=ITERATION_LIMIT,
+    # random_seed=RANDOM_SEED
 )
-SDDP.write_log_to_csv(model,joinpath(output_dir, "training_results.csv"))
+SDDP.write_log_to_csv(model,joinpath(output_dir, "stochastic_solution",  "training_results.csv"))
 
 
 # # Step 5: Run training and simulations
@@ -104,11 +106,11 @@ println("Step 6/6: Generating outputs...")
 print_summary_statistics(simulations, params, data)
 
 # # Export detailed results
-results_file = joinpath(output_dir, "simulation_results.txt")
+results_file = joinpath(output_dir, "stochastic_solution", "simulation_results.txt")
 export_results(simulations, params, data, results_file)
 
 # # Generate visualizations
-generate_visualizations(simulations, params, data, output_dir=output_dir)
+generate_visualizations(simulations, params, data, output_dir=joinpath(output_dir,"stochastic_solution"))
 
 println()
 println("="^80)

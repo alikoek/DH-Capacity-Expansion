@@ -49,3 +49,38 @@ function is_storage_alive(s_invest::Int, s_current::Int, storage_lifetime::Int)
     year_current = ceil(s_current / 2)
     return (1 <= (year_current - year_invest)) && ((year_current - year_invest) <= storage_lifetime)
 end
+
+# former build_dictionnaries
+function get_encoder_decoder(policies_transition, prices_transition, temp_transition, rep_years)
+
+    # state -> policy, price, temperature
+    i = 0
+    state2keys = Dict()
+    keys2state = Dict()
+    for temp in eachrow(temp_transition)
+        nest = Dict()
+        for policy in eachrow(policies_transition)
+            nest2 = Dict()
+            for price in eachrow(prices_transition)  # Fixed: use prices_transition
+                nest2[price["price"]] = i
+                i = i+1
+                state2keys[i] = (policy["policy"], price["price"],temp["temp"])
+            end
+            nest[policy["policy"]] = copy(nest2)
+        end
+        keys2state[temp["temp"]] = copy(nest)
+    end
+
+    # stages -> year, investment
+    stage2year_phase = Dict()
+    year_phase2stage = Dict()
+    for i in 1:length(rep_years)
+        year = rep_years[i]
+        stage2year_phase[2*i-1] = (year,"investment")
+        stage2year_phase[2*i] = (year,"operations")
+
+        year_phase2stage[year,"investment"] = 2*i-1
+        year_phase2stage[year,"operations"] = 2*i
+    end
+    return sort(state2keys), sort(keys2state), sort(stage2year_phase), sort(year_phase2stage)
+end

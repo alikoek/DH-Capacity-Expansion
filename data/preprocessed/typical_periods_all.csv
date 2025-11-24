@@ -1,4 +1,4 @@
-,typical_week,hour,Load Profile,price,year,scenario_price
+,period,hour,Load Profile,price,year,scenario_price
 0,0,0,1264.1199559730683,1084.5479590004718,2050,low
 1,0,1,1186.141628199759,1039.2055211912739,2050,low
 2,0,2,872.4970738151827,878.2101517481365,2050,low

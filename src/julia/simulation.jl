@@ -32,8 +32,12 @@ function train_model(model;
     SDDP.train(model; 
                risk_measure=risk_measure, 
                iteration_limit=iteration_limit, 
-               log_frequency=100,
-            #    stopping_rules = [SDDP.BoundStalling(10, 1e-4)]
+               log_frequency=10,
+
+                parallel_scheme = SDDP.Threaded(),
+                # custom_recorders =
+                #     Dict{Symbol,Function}(:thread_id => sp -> Threads.threadid())
+               stopping_rules = [SDDP.BoundStalling(10, 1e-4)]
             #    dashboard = true
                )
 
@@ -68,6 +72,7 @@ function run_simulation(model;
                                 n_simulations, 
                                 simulation_symbols; 
                                 # custom_recorders=custom_recorders,
+                                parallel_scheme = SDDP.Threaded(),
                                 skip_undefined_variables=true)
 
     println("Simulations complete.")
@@ -92,10 +97,10 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
     # Open output file for writing
     io = open(output_file, "w")
 
-    println(io, "=== SIMULATION RESULTS (Storage with Representative Weeks) ===")
+    println(io, "=== SIMULATION RESULTS (Storage with Representative Periods) ===")
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
-    
+    state2keys, keys2state, stage2year_phase, year_phase2stage = get_encoder_decoder(params.policy_proba_df, params.price_proba_df, params.temperature_proba_df, data.rep_years)
+
     sim = simulations[1]
     
     println(io, "="^35, " TECHNOLOGIES ", "="^35)
@@ -183,18 +188,18 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             
             println(io,"="^29 *" OPERATIONS "*string(year) * " " *"="^29)
 
-            println(io,rpad("Weeks",10) *  "|"*join([(lpad(week,8)) *  "|" for week in data.week_indexes])*"  Total |")
+            println(io,rpad("Periods",10) *  "|"*join([(lpad(period,8)) *  "|" for period in data.period_indexes])*"  Total |")
 
             println(io,"-"^75)
 
             # Production
             for tech in keys(params.tech_dict)
                 tech_line = rpad(string(tech)[1:min(end,10)], 10)*"|"
-                for week in data.week_indexes
-                    prod = sum(sp[:u_production][tech,week,hour] for hour in data.hour_indexes)/ 1e3
+                for period in data.period_indexes
+                    prod = sum(sp[:u_production][tech,period,hour] for hour in data.hour_indexes)/ 1e3
                     tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 end
-                prod = sum(sp[:u_production][tech,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                prod = sum(sp[:u_production][tech,period,hour] * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) for hour in data.hour_indexes for period in data.period_indexes)/ 1e3
                 tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 println(io,tech_line)
             end
@@ -202,22 +207,22 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             # Storage out
             for stor in keys(params.stor_dict)
                 tech_line = lpad(stor, 10)*"|"
-                for week in data.week_indexes
-                    prod = sum(sp[:u_discharge][stor,week,hour] for hour in data.hour_indexes) / 1e3
+                for period in data.period_indexes
+                    prod = sum(sp[:u_discharge][stor,period,hour] for hour in data.hour_indexes) / 1e3
                     tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 end
-                prod = sum(sp[:u_discharge][stor,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                prod = sum(sp[:u_discharge][stor,period,hour] * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) for hour in data.hour_indexes for period in data.period_indexes)/ 1e3
                 tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 println(io,tech_line)
             end
 
             # Unmet demand
             tech_line = lpad("unmet", 10)*"|"
-            for week in data.week_indexes
-                prod = sum(sp[:u_unmet][week,hour] for hour in data.hour_indexes)/ 1e3
+            for period in data.period_indexes
+                prod = sum(sp[:u_unmet][period,hour] for hour in data.hour_indexes)/ 1e3
                 tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
             end
-            prod = sum(sp[:u_unmet][week,hour]  * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+            prod = sum(sp[:u_unmet][period,hour]  * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) for hour in data.hour_indexes for period in data.period_indexes)/ 1e3
             tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
             println(io,tech_line)
 
@@ -226,22 +231,22 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             # Storage In
             for stor in keys(params.stor_dict)
                 tech_line = lpad(stor, 10)*"|"
-                for week in data.week_indexes
-                    prod = sum(sp[:u_charge][stor,week,hour] for hour in data.hour_indexes) / 1e3
+                for period in data.period_indexes
+                    prod = sum(sp[:u_charge][stor,period,hour] for hour in data.hour_indexes) / 1e3
                     tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 end
-                prod = sum(sp[:u_charge][stor,week,hour] * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for hour in data.hour_indexes for week in data.week_indexes)/ 1e3
+                prod = sum(sp[:u_charge][stor,period,hour] * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) for hour in data.hour_indexes for period in data.period_indexes)/ 1e3
                 tech_line  = tech_line * (lpad(round(prod, digits=2), 8)) * "|"
                 println(io,tech_line)
             end
 
             tech_line = lpad("Demand", 10)*"|"
-            for week in data.week_indexes
-                prod = sum(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "year"] .== year) .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"])
-                data.weeks
+            for period in data.period_indexes
+                prod = sum(data.periods[(data.periods[!, "period"] .== period) .& (data.periods[!, "year"] .== year) .& (data.periods[!, "scenario_price"] .== price), "Load Profile"])
+                data.periods
                 tech_line  = tech_line * (lpad(round(prod / 1e3, digits=2), 8)) * "|"
             end
-            prod = sum(sum(data.weeks[(data.weeks[!, "typical_week"] .== week) .& (data.weeks[!, "year"] .== year) .& (data.weeks[!, "scenario_price"] .== price), "Load Profile"]) * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)]) for week in data.week_indexes)
+            prod = sum(sum(data.periods[(data.periods[!, "period"] .== period) .& (data.periods[!, "year"] .== year) .& (data.periods[!, "scenario_price"] .== price), "Load Profile"]) * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)]) for period in data.period_indexes)
             
             tech_line  = tech_line * (lpad(round(prod / 1e3, digits=2), 8)) * "|"
             println(io,tech_line)
@@ -276,8 +281,8 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     println("SUMMARY STATISTICS")
     println("="^80)
 
-    state2keys, keys2state, stage2year_phase, year_phase2stage = build_dictionnaries(params.policy_proba_df, params.price_proba_df, data.rep_years)
-    
+    state2keys, keys2state, stage2year_phase, year_phase2stage = get_encoder_decoder(params.policy_proba_df, params.price_proba_df, params.temperature_proba_df, data.rep_years)
+
     all_stages = keys(stage2year_phase)
     inv_stages = [state for (state, dept) in stage2year_phase if dept[2] == "investment"]
     ope_stages = [state for (state, dept) in stage2year_phase if dept[2] == "operations"]
@@ -330,10 +335,10 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
             state = simulations[sim][t][:node_index][2]
             policy, price = state2keys[state]
             total_unmet = 0.0
-            for week in data.week_indexes
-                week_unmet = sum(value(simulations[sim][t][:u_unmet][week, hour])
+            for period in data.period_indexes
+                period_unmet = sum(value(simulations[sim][t][:u_unmet][period, hour])
                                  for hour in data.hour_indexes)
-                total_unmet += week_unmet * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)])
+                total_unmet += period_unmet * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)])
             end
             push!(unmet_values, total_unmet)
         end
@@ -357,11 +362,11 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
             policy, price = state2keys[state]
 
             total_discharge = 0.0
-            for week in data.week_indexes
-                week_discharge = sum(value(simulations[sim][t][:u_discharge][stor,week, hour])
+            for period in data.period_indexes
+                period_discharge = sum(value(simulations[sim][t][:u_discharge][stor,period, hour])
                                     for hour in data.hour_indexes)
 
-                total_discharge += week_discharge * first(data.week_weights[(data.week_weights[!,"year"] .== (year)) .& (data.week_weights[!,"scenario_price"] .== price), string(week)])
+                total_discharge += period_discharge * first(data.period_weights[(data.period_weights[!,"year"] .== (year)) .& (data.period_weights[!,"scenario_price"] .== price), string(period)])
             end
             push!(storage_utilization, total_discharge)
         end

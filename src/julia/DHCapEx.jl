@@ -38,7 +38,7 @@ export load_parameters, ModelParameters
 export load_all_data, ProcessedData
 export build_sddp_model
 export run_simulation, train_model, export_results, print_summary_statistics
-export generate_visualizations
+export generate_visualizations, get_encoder_decoder
 
 # Include all module files
 include("parameters.jl")
