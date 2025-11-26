@@ -44,6 +44,7 @@ struct ModelParameters
     carbon_trajectory::Vector{Float64}  # Single net-zero trajectory
     temp_scenarios::Vector{Symbol}
     temp_cop_multipliers::Dict{Symbol,Float64}
+    temp_demand_multipliers::Dict{Symbol,Float64}  # Demand multiplier per temperature scenario
     temp_scenario_probabilities::Dict{Int,Float64}
     energy_transitions::Matrix{Float64}
     initial_energy_dist::Vector{Float64}
@@ -322,6 +323,26 @@ function load_parameters(excel_path::String)
     temp_scenarios = [Symbol(row.description) for row in eachrow(temp_scen_df)]
     temp_cop_multipliers = Dict(zip(temp_scenarios, round.(Float64.(temp_scen_df.cop_multiplier), digits=4)))
 
+    # Load demand_multiplier if present, otherwise default to 1.0
+    if "demand_multiplier" in names(temp_scen_df)
+        # Handle comma decimal separator (European locale)
+        demand_mult_values = Float64[]
+        for val in temp_scen_df.demand_multiplier
+            if val isa Number
+                push!(demand_mult_values, Float64(val))
+            else
+                # Replace comma with period for parsing
+                normalized = replace(string(val), "," => ".")
+                push!(demand_mult_values, parse(Float64, normalized))
+            end
+        end
+        temp_demand_multipliers = Dict(zip(temp_scenarios, round.(demand_mult_values, digits=4)))
+        println("  Loaded temperature scenario demand multipliers: $temp_demand_multipliers")
+    else
+        temp_demand_multipliers = Dict(scen => 1.0 for scen in temp_scenarios)
+        println("  No demand_multiplier column in TemperatureScenarios - using default 1.0")
+    end
+
     # Load TemperatureProbabilities sheet
     temp_prob_sheet = xf["TemperatureProbabilities"]
     temp_prob_df = DataFrame(XLSX.gettable(temp_prob_sheet))
@@ -336,8 +357,9 @@ function load_parameters(excel_path::String)
         energy_transitions[i, :] = round.([Float64(row.to_high), Float64(row.to_medium), Float64(row.to_low)], digits=4)
     end
 
-    # Set initial energy distribution (could also be added to Excel if needed)
-    initial_energy_dist = round.([0.3, 0.4, 0.3], digits=4)
+    # Set initial energy distribution: start from Medium state (row 2 of transition matrix)
+    # This ensures consistency with the Markov chain dynamics
+    initial_energy_dist = round.(energy_transitions[2, :], digits=4)  # [0.05, 0.9, 0.05] for Medium start
 
     # Calculate investment stages (excluding stage 0 - no longer used with retirement schedule)
     investment_stages = collect(1:2:(2*T-1))
@@ -468,7 +490,7 @@ function load_parameters(excel_path::String)
         c_efficiency_el, c_energy_carrier, c_lifetime_new, c_lifetime_initial,
         c_capacity_limits,
         storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
-        energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_scenario_probabilities,
+        energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_demand_multipliers, temp_scenario_probabilities,
         energy_transitions, initial_energy_dist,
         investment_stages,
         c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability,
