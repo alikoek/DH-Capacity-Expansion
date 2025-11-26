@@ -17,8 +17,10 @@ systems using Stochastic Dual Dynamic Programming (SDDP).
 
 # VSS Analysis Functions
 - `build_deterministic_model(params, data)`: Build expected-value deterministic benchmark
-- `extract_ev_investments(ev_model, ev_variables, params)`: Extract EV investment decisions
+- `extract_ev_investments(ev_model, ev_variables, params)`: Extract EV investment decisions from JuMP model
+- `extract_ev_investments_from_simulations(ev_simulations, params)`: Extract EV investment decisions from SDDP simulations
 - `evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios)`: Evaluate EV policy under uncertainty
+- `build_ev_sddp_model_integrated(params, data)`: Build SDDP-based EV model with expected values
 
 # Results I/O Functions
 - `save_simulation_results(simulations, params, data, filepath)`: Save results to disk
@@ -67,7 +69,8 @@ export decode_markov_state
 
 # Export VSS analysis functions
 export build_deterministic_model
-export extract_ev_investments, evaluate_ev_policy
+export extract_ev_investments, evaluate_ev_policy, extract_ev_investments_from_simulations
+export build_ev_sddp_model_integrated, verify_ev_model_structure  # EV model functions
 
 # Export results I/O functions
 export save_simulation_results, save_simulation_results_auto
@@ -87,6 +90,8 @@ include("visualization.jl")
 # VSS analysis modules
 include("deterministic_model.jl")
 include("ev_policy_evaluation.jl")
+include("ev_model_integrated.jl")  # The WORKING EV model implementation
+# include("two_stage_proper.jl")  # Conceptual two-stage model (incomplete, for future development)
 
 # Results I/O module
 include("results_io.jl")

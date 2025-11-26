@@ -52,6 +52,50 @@ end
 
 
 """
+    extract_ev_investments_from_simulations(ev_simulations, params)
+
+Extract investment decisions from EV SDDP model simulations.
+Since EV model is deterministic, all simulations should have identical investments.
+
+# Arguments
+- `ev_simulations`: Simulation results from EV SDDP model
+- `params`: ModelParameters structure
+
+# Returns
+Dictionary mapping stage => Dict(:tech => Dict(tech => MW), :storage => MW)
+Only extracts from vintage_stages (excludes last investment stage).
+"""
+function extract_ev_investments_from_simulations(ev_simulations, params)
+    # Calculate vintage stages (same logic as model_builder.jl)
+    last_inv_stage = 2 * params.T - 1
+    vintage_stages = filter(s -> s != last_inv_stage, params.investment_stages)
+
+    # Use first simulation (all should be identical for deterministic EV model)
+    sim = ev_simulations[1]
+
+    ev_investments = Dict{Int, Dict{Symbol, Any}}()
+
+    for stage in vintage_stages
+        # Extract technology investments
+        tech_investments = Dict{Symbol, Float64}()
+        for tech in params.technologies
+            tech_investments[tech] = sim[stage][:u_expansion_tech][tech]
+        end
+
+        # Extract storage investment
+        storage_investment = sim[stage][:u_expansion_storage]
+
+        ev_investments[stage] = Dict(
+            :tech => tech_investments,
+            :storage => storage_investment
+        )
+    end
+
+    return ev_investments
+end
+
+
+"""
     evaluate_ev_policy(sddp_model, ev_investments, params, n_scenarios)
 
 Evaluate the EV (deterministic) investment policy under uncertainty by:
