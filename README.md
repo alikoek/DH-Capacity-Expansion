@@ -8,9 +8,9 @@ A modular Julia framework for optimizing capacity expansion decisions in distric
 - **Thermal storage modeling**: With charge/discharge dynamics and heat losses
 - **Representative weeks**: Efficient temporal resolution using TSAM clustering
 - **Three-uncertainty stochastic optimization**:
-  - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes
-  - **Stage-wise independent demand**: Random demand multipliers at each operational stage
-  - **Early system temperature scenario branching**: Two DH system temperature scenarios (Low-temp/High-temp) affecting heat pump COP
+  - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes (starting from Medium)
+  - **Temperature-dependent demand**: Demand multipliers per temperature scenario
+  - **Early system temperature scenario branching**: Two DH system temperature scenarios (Low-temp/High-temp) affecting heat pump COP and demand
 - **Risk measures**: CVaR, expectation, worst-case
 - **Vintage tracking**: Tracks capacity by investment year and retirement
 - **Comprehensive visualization**: Investment plots, load duration curves, violin plots, spaghetti plots
@@ -130,15 +130,15 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 - `scenario`: Scenario number (1-2)
 - `description`: Scenario description (Low-temp, High-temp)
 - `cop_multiplier`: COP multiplier for heat pumps (e.g., 1.1 for low-temp DH, 0.9 for high-temp DH)
+- `demand_multiplier`: Demand scaling factor for this scenario (optional, defaults to 1.0)
 
 **TemperatureProbabilities**: Branching probabilities for temperature scenarios
 - `scenario`: Scenario number (1-2)
 - `probability`: Branching probability at stage 1 (must sum to 1.0)
 
-**DemandUncertainty**: Stage-wise independent demand multipliers
-- `multiplier`: Demand multiplier value
-- `probability`: Probability at each operational stage (must sum to 1.0)
-- `description`: Multiplier description
+**DemandUncertainty** (deprecated): Stage-wise independent demand multipliers
+- Now handled via `demand_multiplier` column in TemperatureScenarios sheet
+- Demand varies by temperature scenario rather than stage-wise independently
 
 **EnergyTransitions**: Markovian transition matrix for energy price states (3×3)
 - `from_state`: Current energy state (High, Medium, Low)
@@ -146,6 +146,7 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 - `to_medium`: Probability of transitioning to Medium state
 - `to_low`: Probability of transitioning to Low state
 - **Note**: Each row must sum to 1.0
+- **Initial state**: Model starts from Medium state (row 2 used as initial distribution)
 
 ## Configuration Examples
 
@@ -369,23 +370,20 @@ The model incorporates three types of uncertainty with different probabilistic s
 #### 2. Markovian Energy Prices (State-Dependent)
 - **States**: High (45 €/MWh), Medium (30 €/MWh), Low (20 €/MWh)
 - **Transitions**: Between investment → operational stages within each temperature scenario
-- **Structure**: First-order Markov chain with persistence (diagonal elements = 0.6)
-- **Initial distribution**: [30% High, 40% Medium, 30% Low]
+- **Structure**: First-order Markov chain with persistence (diagonal elements = 0.6-0.9)
+- **Initial state**: Model starts from Medium state (row 2 of transition matrix as initial distribution)
 - **Interpretation**: Energy price regimes that persist but can transition over time
 
 **Example transition**: If energy prices are High in year 1, there's a 60% chance they stay High in year 2, 30% chance they drop to Medium, and 10% chance they drop to Low.
 
 **Note**: Energy price transitions occur independently within each temperature scenario (6 total energy×temperature states).
 
-#### 3. Stage-wise Independent Demand (i.i.d.)
-- **Multipliers**: [1.1, 1.0, 0.9] (High, Normal, Low demand)
-- **Probabilities**: [0.2, 0.5, 0.3]
-- **Timing**: Sampled at each operational stage
-- **Structure**: Independent across stages (no memory)
-- **State variable**: Cumulative demand tracked through multiplicative state variable
-- **Interpretation**: Short-term demand fluctuations (weather, economic activity)
-
-**Note**: First model year (stage 2) is deterministic with multiplier = 1.0
+#### 3. Temperature-Dependent Demand
+- **Multipliers**: Defined per temperature scenario in TemperatureScenarios sheet
+- **Example**: Low-temp DH → demand_multiplier = 0.8 (lower temperatures mean lower heat losses)
+- **Structure**: Demand multiplier follows temperature scenario (persistent throughout horizon)
+- **Calculation**: `demand = base_demand × temp_demand_multiplier × extreme_event_multiplier`
+- **Interpretation**: DH network temperature affects heat losses and thus overall demand
 
 ### Node Structure
 
@@ -410,8 +408,8 @@ For a 4-year horizon (T=4), the model has **39 nodes**:
 - **Vintage tracking**: Capacities tracked by investment year with retirement based on lifetime
 - **Representative weeks**: 168-hour representative weeks with occurrence weights
 - **Storage dynamics**: Hourly charge/discharge with efficiency losses and heat dissipation
-- **Cumulative demand tracking**: Multiplicative state variable compounds demand multipliers over time
-- **Deterministic first year**: No uncertainty in initial operational period for stability
+- **Temperature-dependent demand**: Demand scaled by temperature scenario multiplier
+- **Consistent initial state**: Markov chain starts from Medium for both SDDP and EV models
 
 ## Testing and Validation
 
