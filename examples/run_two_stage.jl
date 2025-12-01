@@ -84,7 +84,7 @@ for (node_index, node) in model.nodes
         # Access the subproblem
         subproblem = node.subproblem
         
-        @constraint(subproblem, KeepTech[tech in keys(params.tech_dict)], subproblem[:U_tech][tech] == subproblem[:X_tech][tech,1].in)
+        @constraint(subproblem, KeepTech[tech in keys(params.tech_dict)], subproblem[:U_tech][tech] <= subproblem[:X_tech][tech,1].in)
         
     end
 end
