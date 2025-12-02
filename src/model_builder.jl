@@ -526,9 +526,9 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             end
 
             # ===== TEMPERATURE-DEPENDENT DEMAND MULTIPLIER =====
-            # Get demand multiplier for this temperature scenario
+            # Get year-varying demand multiplier for this temperature scenario
             temp_scen_name = params.temp_scenarios[temp_scenario]
-            temp_demand_mult = params.temp_demand_multipliers[temp_scen_name]
+            temp_demand_mult = params.temp_demand_multipliers[temp_scen_name][model_year]
 
             # ===== EXTREME EVENTS PARAMETERIZATION =====
             # Determine scenarios based on Excel configuration
@@ -551,11 +551,12 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             # CRITICAL FIX: Pass probabilities as second argument to use configured probabilities
             SDDP.parameterize(sp, Ω_extreme, probabilities_extreme) do ω
                 # 1. Modify demand balance RHS for each constraint
-                # Demand = base_demand * temp_scenario_multiplier * extreme_event_multiplier
+                # Demand = scenario_specific_base_demand * temp_scenario_multiplier * extreme_event_multiplier
+                # Note: demand now varies with energy price scenario (scenario = :high/:medium/:low)
                 for week in 1:data.n_weeks, hour in 1:data.hours_per_week
                     JuMP.set_normalized_rhs(
                         demand_cons[week][hour],
-                        data.scaled_weeks[week][hour] * temp_demand_mult * ω.demand_mult
+                        data.scaled_weeks[model_year][scenario][week][hour] * temp_demand_mult * ω.demand_mult
                     )
                 end
 
