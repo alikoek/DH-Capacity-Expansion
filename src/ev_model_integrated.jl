@@ -37,19 +37,22 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     # ========================================================================
     println("    Step 1: Calculating expected values...")
 
-    # 1a. Expected COP and demand multiplier from temperature scenarios
+    # 1a. Expected COP and year-varying expected demand multiplier from temperature scenarios
     expected_cop = 0.0
-    expected_temp_demand_mult = 0.0
+    expected_temp_demand_mult = zeros(params.T)  # Year-varying expected demand multiplier
+
     for (idx, scenario_symbol) in enumerate(params.temp_scenarios)
         prob = params.temp_scenario_probabilities[idx]
         cop = params.temp_cop_multipliers[scenario_symbol]
-        demand_mult = params.temp_demand_multipliers[scenario_symbol]
+        demand_mult_vec = params.temp_demand_multipliers[scenario_symbol]  # Now a Vector
+
         expected_cop += cop * prob
-        expected_temp_demand_mult += demand_mult * prob
-        println("      Temp scenario $idx ($scenario_symbol): COP=$cop, demand=$demand_mult, prob=$prob")
+        expected_temp_demand_mult .+= demand_mult_vec .* prob
+
+        println("      Temp scenario $idx ($scenario_symbol): COP=$cop, demand=$(demand_mult_vec), prob=$prob")
     end
     println("      → Expected COP: $(round(expected_cop, digits=3))")
-    println("      → Expected demand multiplier: $(round(expected_temp_demand_mult, digits=3))")
+    println("      → Expected demand multiplier (year-varying): $(round.(expected_temp_demand_mult, digits=3))")
 
     # 1b. Time-dependent energy price distributions starting from Medium state
     # This matches SDDP which starts from Medium (state 2) and evolves through Markov chain
@@ -146,6 +149,7 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         params.salvage_fraction,
         params.c_penalty,
         params.elec_taxes_levies,
+        params.n_typical_weeks,
 
         # Technologies (unchanged)
         params.technologies,
@@ -158,7 +162,6 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         params.c_efficiency_el,
         params.c_energy_carrier,
         params.c_lifetime_new,
-        params.c_lifetime_initial,
         params.c_capacity_limits,
 
         # Storage (unchanged)
@@ -194,41 +197,61 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     )
 
     # ========================================================================
-    # Step 3: Create EV data with expected electricity prices
+    # Step 3: Create EV data with expected demand and electricity prices
     # ========================================================================
-    println("\n    Step 3: Creating EV data with expected electricity prices...")
+    println("\n    Step 3: Creating EV data with expected values...")
 
-    ev_data = deepcopy(data)
+    # Map state indices to symbols
+    state_symbols = [:high, :medium, :low]  # States: 1=High, 2=Medium, 3=Low
 
-    # Calculate expected electricity prices using year-specific distributions
-    # The field is purch_elec_prices with symbols :low, :medium, :high
-    for year in keys(data.purch_elec_prices)
-        # Get size from first scenario
-        first_scenario = first(values(data.purch_elec_prices[year]))
-        n_weeks, n_hours = size(first_scenario)
-        expected_prices = zeros(n_weeks, n_hours)
+    # Calculate expected demand for each year/week/hour
+    ev_scaled_weeks = Dict{Int, Dict{Symbol, Vector{Vector{Float64}}}}()
+    ev_purch_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
+    ev_sale_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
 
-        # Map state indices to symbols
-        state_symbols = [:high, :medium, :low]  # States: 1=High, 2=Medium, 3=Low
+    for year in 1:params.T
+        year_dist = year_distributions[year]  # [P(high), P(med), P(low)]
 
-        # Use year-specific distribution (consistent with SDDP starting from Medium)
-        year_dist = year_distributions[year]
-        for (state_idx, state_symbol) in enumerate(state_symbols)
-            if haskey(data.purch_elec_prices[year], state_symbol)
-                expected_prices .+= data.purch_elec_prices[year][state_symbol] .* year_dist[state_idx]
+        # Calculate expected demand
+        expected_demand = Vector{Vector{Float64}}()
+        for week in 1:data.n_weeks
+            week_demand = zeros(data.hours_per_week)
+            for (state_idx, state_symbol) in enumerate(state_symbols)
+                week_demand .+= data.scaled_weeks[year][state_symbol][week] .* year_dist[state_idx]
             end
+            push!(expected_demand, round.(week_demand, digits=2))
         end
 
-        # Set same expected prices for all 3 scenarios (structure compatibility)
-        ev_data.purch_elec_prices[year] = Dict(
-            :low => expected_prices,
-            :medium => expected_prices,
-            :high => expected_prices
-        )
+        # Calculate expected electricity prices
+        first_scenario = first(values(data.purch_elec_prices[year]))
+        n_weeks, n_hours = size(first_scenario)
 
-        mean_price = mean(expected_prices)
-        println("      Year $year: mean elec price = $(round(mean_price, digits=2)) €/MWh")
+        expected_purch_prices = zeros(n_weeks, n_hours)
+        expected_sale_prices = zeros(n_weeks, n_hours)
+        for (state_idx, state_symbol) in enumerate(state_symbols)
+            expected_purch_prices .+= data.purch_elec_prices[year][state_symbol] .* year_dist[state_idx]
+            expected_sale_prices .+= data.sale_elec_prices[year][state_symbol] .* year_dist[state_idx]
+        end
+
+        # Store same expected values for all scenarios (EV model is deterministic)
+        ev_scaled_weeks[year] = Dict(s => expected_demand for s in state_symbols)
+        ev_purch_elec_prices[year] = Dict(s => round.(expected_purch_prices, digits=4) for s in state_symbols)
+        ev_sale_elec_prices[year] = Dict(s => round.(expected_sale_prices, digits=4) for s in state_symbols)
+
+        mean_demand = mean(mean.(expected_demand))
+        mean_price = mean(expected_purch_prices)
+        println("      Year $year: mean demand = $(round(mean_demand, digits=1)) MW, mean elec price = $(round(mean_price, digits=3)) TSEK/MWh")
     end
+
+    # Create new ProcessedData with expected values
+    ev_data = ProcessedData(
+        data.n_weeks,
+        data.hours_per_week,
+        data.week_weights_normalized,
+        ev_scaled_weeks,
+        ev_purch_elec_prices,
+        ev_sale_elec_prices
+    )
 
     # ========================================================================
     # Step 4: Build model using original build_sddp_model
@@ -250,8 +273,8 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     println("    ✓ Extreme events: $(ev_params.enable_extreme_events ? "ENABLED with expected values" : "DISABLED")")
     println("\n  Structure:")
     println("    - Stages: $(2 * ev_params.T)")
-    println("    - Nodes: $(length(ev_model.nodes)) (should be $(2 * ev_params.T) for linear)")
-    println("    - Temperature scenarios: 1 (expected COP = $(round(expected_cop, digits=2)), demand mult = $(round(expected_temp_demand_mult, digits=2)))")
+    println("    - Nodes: $(length(ev_model.nodes)) (same tree structure as SDDP, identical values on all branches)")
+    println("    - Temperature scenarios: 1 (expected COP = $(round(expected_cop, digits=2)), demand mult = $(round.(expected_temp_demand_mult, digits=2)))")
     println("    - Energy states: 1 (time-dependent, starting from Medium)")
 
     return ev_model, ev_params, ev_data

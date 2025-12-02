@@ -68,7 +68,7 @@ export generate_visualizations
 export decode_markov_state
 
 # Export VSS analysis functions
-export build_deterministic_model
+# export build_deterministic_model  # Deprecated - use build_ev_sddp_model_integrated instead
 export extract_ev_investments, evaluate_ev_policy, extract_ev_investments_from_simulations
 export build_ev_sddp_model_integrated, verify_ev_model_structure  # EV model functions
 
@@ -88,7 +88,7 @@ include("simulation_metrics.jl")
 include("visualization.jl")
 
 # VSS analysis modules
-include("deterministic_model.jl")
+# include("deterministic_model.jl")  # Deprecated - use ev_model_integrated.jl instead
 include("ev_policy_evaluation.jl")
 include("ev_model_integrated.jl")  # The WORKING EV model implementation
 # include("two_stage_proper.jl")  # Conceptual two-stage model (incomplete, for future development)
