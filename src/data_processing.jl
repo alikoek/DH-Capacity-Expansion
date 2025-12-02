@@ -1,217 +1,170 @@
 """
-Data loading and preprocessing for representative weeks and electricity prices
+Data loading and preprocessing for representative weeks and electricity prices.
+
+Loads from typical_weeks_{n}.csv which contains scenario-specific demand and prices.
 """
 
-using CSV, DataFrames, Dates, Statistics, XLSX
+using CSV, DataFrames, Statistics
 
 """
-Structure to hold processed demand and price data
+Structure to hold processed demand and price data.
+
+Both demand and electricity prices are scenario-specific (low, medium, high).
 """
 struct ProcessedData
-    # Representative weeks
+    # Representative weeks configuration
     n_weeks::Int
     hours_per_week::Int
-    representative_weeks::Vector{Vector{Float64}}
     week_weights_normalized::Vector{Float64}
-    scaled_weeks::Vector{Vector{Float64}}
 
-    # Electricity prices - 3 scenarios per model year (low, medium, high)
-    # Stored as Dict[model_year][scenario] where scenario ∈ {:low, :medium, :high}
+    # Scenario-specific demand: [model_year][scenario][week_idx] -> Vector{Float64} (168 hours)
+    # scenario ∈ {:low, :medium, :high}
+    scaled_weeks::Dict{Int, Dict{Symbol, Vector{Vector{Float64}}}}
+
+    # Scenario-specific electricity prices: [model_year][scenario] -> Matrix{Float64} (n_weeks × 168)
+    # scenario ∈ {:low, :medium, :high}
     purch_elec_prices::Dict{Int, Dict{Symbol, Matrix{Float64}}}
     sale_elec_prices::Dict{Int, Dict{Symbol, Matrix{Float64}}}
 end
 
 """
-    load_representative_weeks(data_dir::String, base_annual_demand::Float64)
-
-Load and process representative weeks from TSAM output.
-
-# Arguments
-- `data_dir::String`: Directory containing the data files
-- `base_annual_demand::Float64`: Base annual demand in MWh
-
-# Returns
-- Processed representative weeks data
-"""
-function load_representative_weeks(data_dir::String, base_annual_demand::Float64)
-    println("Loading representative weeks data...")
-    hours_per_week = 168  # 7 * 24 hours
-
-    # Load TSAM data
-    filename_tsam = joinpath(data_dir, "typical_weeks.csv")
-    tsam_data = CSV.read(filename_tsam, DataFrame)
-
-    # Group rows by typical-week id and extract 168-hour profiles
-    week_ids = sort(unique(tsam_data[!, "Typical Week"]))
-    @assert all(count(==(w), tsam_data[!, "Typical Week"]) == hours_per_week for w in week_ids) "Each week must have 168 rows."
-
-    insertcols!(tsam_data, :hour_in_week => zeros(Int, nrow(tsam_data)))
-    for w in week_ids
-        idx = findall(tsam_data[!, "Typical Week"] .== w)
-        @assert length(idx) == hours_per_week
-        tsam_data[idx, :hour_in_week] .= 1:hours_per_week
-    end
-
-    representative_weeks = [collect(tsam_data[tsam_data[!, "Typical Week"] .== w, "load"]) for w in week_ids]
-    n_weeks = length(representative_weeks)
-
-    week_weights = [mean(skipmissing(tsam_data[tsam_data[!, "Typical Week"] .== w, "weight_abs"])) |> float for w in week_ids]
-    # Normalize weights to 52 weeks
-    week_weights_normalized = week_weights .* (52 / sum(week_weights))
-    # Round weights to avoid false precision (4 decimal places is sufficient)
-    week_weights_normalized = round.(week_weights_normalized, digits=4)
-
-    # Scale demand to annual total
-    scaling_factor = base_annual_demand /
-        sum(sum(week) * w for (week, w) in zip(representative_weeks, week_weights_normalized))
-
-    # Round demand profiles to 2 decimal places (precision of ~0.01 MW is sufficient)
-    scaled_weeks = [round.(week .* scaling_factor, digits=2) for week in representative_weeks]
-
-    println("Representative weeks loaded: $(n_weeks) * $(hours_per_week)h; weights sum = $(sum(week_weights_normalized))")
-    println("Week weights: ", week_weights_normalized)
-
-    return n_weeks, hours_per_week, representative_weeks, week_weights_normalized, scaled_weeks
-end
-
-"""
-    hourly_profile_from_full_year(p_full::AbstractVector{<:Real}, start_dt::DateTime)
-
-Convert full-year hourly prices to average hourly profile for a week.
-
-# Arguments
-- `p_full::AbstractVector{<:Real}`: Full year of hourly prices (8760 or 8784 hours)
-- `start_dt::DateTime`: Start datetime for the price data
-
-# Returns
-- Vector of 168 average hourly prices for each hour of the week
-"""
-function hourly_profile_from_full_year(p_full::AbstractVector{<:Real}, start_dt::DateTime)
-    H = 168
-    sums = zeros(Float64, H)
-    counts = zeros(Int, H)
-
-    for (k, p) in pairs(p_full)
-        t = start_dt + Hour(k - 1)
-        # Julia: dayofweek(Mon=1,…,Sun=7), hour(t)=0…23  → index 1…168
-        hW = (dayofweek(t) - 1) * 24 + hour(t) + 1
-        sums[hW] += p
-        counts[hW] += 1
-    end
-    @assert all(counts .> 0)
-    # Convert SEK to TSEK and round to 4 decimal places
-    return round.(sums ./ counts ./ 1000, digits=4)  # 168-length average price for each hour-of-week in TSEK/MWh
-end
-
-"""
-    process_electricity_prices(data_dir::String, n_weeks::Int, model_year::Int, elec_taxes_levies::Float64)
-
-Load and process electricity price data for a specific model year from Stockholm data.
-Creates 3 price scenarios (low, medium, high) where:
-- Low: Nuclear-heavy scenario (low, stable prices)
-- High: Renewable-heavy scenario (high, volatile prices)
-- Medium: Average of low and high
-
-The Excel data represents spot market prices (used as sale prices).
-Purchase prices are calculated by adding taxes and levies to the sale prices.
-
-These are correlated with energy price states (low gas → low elec, etc.)
-
-# Arguments
-- `data_dir::String`: Directory containing the data files
-- `n_weeks::Int`: Number of representative weeks
-- `model_year::Int`: Model year (1, 2, 3, 4 corresponding to 2020, 2030, 2040, 2050)
-- `elec_taxes_levies::Float64`: Taxes and levies to add to spot prices (EUR/MWh)
-
-# Returns
-- Tuple of 6 price matrices: (purch_low, sale_low, purch_med, sale_med, purch_high, sale_high)
-"""
-function process_electricity_prices(data_dir::String, n_weeks::Int, model_year::Int, elec_taxes_levies::Float64)
-    println("Processing electricity prices for model year $model_year...")
-
-    # Map model years to data years
-    # Model year 1 (2020) → use 2023 data (earliest available)
-    # Model year 2 (2030) → use 2030 data
-    # Model year 3 (2040) → use 2040 data
-    # Model year 4 (2050) → use 2050 data
-    data_year_map = Dict(1 => "2023", 2 => "2030", 3 => "2040", 4 => "2050")
-    data_year = data_year_map[model_year]
-
-    # Load electricity prices from Excel
-    filename_elec = joinpath(data_dir, "ElectricityPrices.xlsx")
-    xf = XLSX.readxlsx(filename_elec)
-
-    # Load low (nuclear) and high (renewable) price scenarios
-    df_low = DataFrame(XLSX.gettable(xf["Electricity price - low"]))
-    df_high = DataFrame(XLSX.gettable(xf["Electricity price - high"]))
-
-    # Extract the specific year column (convert to Float64 vector)
-    elec_price_low_full = Float64.(df_low[:, data_year])
-    elec_price_high_full = Float64.(df_high[:, data_year])
-
-    # Convert to hourly profiles (168 hours per week)
-    # Use year from data for datetime (leap year handling)
-    year_num = parse(Int, data_year)
-    p_low_hw = hourly_profile_from_full_year(elec_price_low_full, DateTime(year_num, 1, 1))
-    p_high_hw = hourly_profile_from_full_year(elec_price_high_full, DateTime(year_num, 1, 1))
-
-    # Create MEDIUM scenario as average of low and high (rounded)
-    p_medium_hw = round.((p_low_hw .+ p_high_hw) ./ 2, digits=4)
-
-    # Build (n_weeks × 168) matrices for each scenario
-    # Excel data represents spot market prices (sale prices)
-    sale_elec_price_low = repeat(permutedims(p_low_hw), n_weeks, 1)
-    sale_elec_price_medium = repeat(permutedims(p_medium_hw), n_weeks, 1)
-    sale_elec_price_high = repeat(permutedims(p_high_hw), n_weeks, 1)
-
-    # Purchase prices = sale prices + taxes and levies (rounded)
-    # Note: elec_taxes_levies already converted to TSEK in parameters.jl
-    purch_elec_price_low = round.(sale_elec_price_low .+ elec_taxes_levies, digits=4)
-    purch_elec_price_medium = round.(sale_elec_price_medium .+ elec_taxes_levies, digits=4)
-    purch_elec_price_high = round.(sale_elec_price_high .+ elec_taxes_levies, digits=4)
-
-    println("  Using year $data_year from Stockholm data")
-    println("  Created 3 electricity price scenarios:")
-    println("    Low (nuclear):     mean = $(round(mean(p_low_hw), digits=4)) TSEK/MWh")
-    println("    Medium (average):  mean = $(round(mean(p_medium_hw), digits=4)) TSEK/MWh")
-    println("    High (renewable):  mean = $(round(mean(p_high_hw), digits=4)) TSEK/MWh")
-
-    return purch_elec_price_low, sale_elec_price_low,
-           purch_elec_price_medium, sale_elec_price_medium,
-           purch_elec_price_high, sale_elec_price_high
-end
-
-"""
     load_all_data(params::ModelParameters, data_dir::String)
 
-Load and process all required data for the model.
+Load and process all required data from typical_weeks_{n}.csv.
+
+The CSV contains scenario-specific demand and electricity prices for each year/week/hour.
 
 # Arguments
-- `params::ModelParameters`: Model parameters structure
-- `data_dir::String`: Directory containing data files
+- `params::ModelParameters`: Model parameters (T, T_years, n_typical_weeks, base_annual_demand, elec_taxes_levies)
+- `data_dir::String`: Directory containing typical_weeks_{n}.csv
 
 # Returns
-- `ProcessedData`: Structure containing all processed data
+- `ProcessedData`: Structure containing scenario-specific demand and prices
 """
 function load_all_data(params::ModelParameters, data_dir::String)
-    # Load representative weeks
-    n_weeks, hours_per_week, representative_weeks, week_weights_normalized, scaled_weeks =
-        load_representative_weeks(data_dir, params.base_annual_demand)
+    hours_per_week = 168
 
-    # Load electricity prices for all model years
+    # Load CSV file based on n_typical_weeks
+    filename = joinpath(data_dir, "typical_weeks_$(params.n_typical_weeks).csv")
+    if !isfile(filename)
+        error("Data file not found: $filename. Please ensure typical_weeks_$(params.n_typical_weeks).csv exists.")
+    end
+    df = CSV.read(filename, DataFrame)
+
+    println("  Loading data from: typical_weeks_$(params.n_typical_weeks).csv")
+
+    # Build year mapping (consistent with parameters.jl)
+    # Year 1 → 2023 (base year with data)
+    # Year 2 → 2030
+    # Year 3+ → 2030 + (m-2)*T_years
+    # T_years=5:  2023, 2030, 2035, 2040
+    # T_years=10: 2023, 2030, 2040, 2050
+    model_to_csv_year = Dict{Int,Int}(1 => 2023, 2 => 2030)
+    for m in 3:params.T
+        model_to_csv_year[m] = 2030 + (m - 2) * params.T_years
+    end
+    csv_to_model_year = Dict(v => k for (k, v) in model_to_csv_year)
+
+    println("  Year mapping: ", join(["$m → $(model_to_csv_year[m])" for m in 1:params.T], ", "))
+
+    # Map CSV scenario names to model symbols
+    scenario_map = Dict("low" => :low, "mid" => :medium, "high" => :high)
+
+    # Get available periods (weeks) and validate
+    available_periods = sort(unique(df.period))
+    n_weeks = length(available_periods)
+    println("  Typical weeks: $n_weeks (periods: $(available_periods))")
+
+    # Extract week weights (should be consistent across scenarios)
+    # Use first year and first scenario to get weights
+    first_year = first(unique(df.year))
+    first_scenario = first(unique(df.scenario_price))
+    week_weights = Float64[]
+    for period in available_periods
+        subset = filter(row -> row.year == first_year && row.scenario_price == first_scenario && row.period == period, df)
+        weight = first(subset.weight)
+        push!(week_weights, weight)
+    end
+
+    # Normalize weights to sum to 52
+    week_weights_normalized = week_weights .* (52 / sum(week_weights))
+    week_weights_normalized = round.(week_weights_normalized, digits=4)
+    println("  Week weights: $(week_weights_normalized) (sum = $(round(sum(week_weights_normalized), digits=1)))")
+
+    # Initialize data structures
+    scaled_weeks = Dict{Int, Dict{Symbol, Vector{Vector{Float64}}}}()
     purch_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
     sale_elec_prices = Dict{Int, Dict{Symbol, Matrix{Float64}}}()
 
+    # Process each model year
     for model_year in 1:params.T
-        purch_low, sale_low, purch_med, sale_med, purch_high, sale_high =
-            process_electricity_prices(data_dir, n_weeks, model_year, params.elec_taxes_levies)
+        csv_year = model_to_csv_year[model_year]
 
-        purch_elec_prices[model_year] = Dict(:low => purch_low, :medium => purch_med, :high => purch_high)
-        sale_elec_prices[model_year] = Dict(:low => sale_low, :medium => sale_med, :high => sale_high)
+        # Check if this year exists in the CSV
+        if !(csv_year in unique(df.year))
+            available_years = sort(unique(df.year))
+            error("Year $csv_year (model year $model_year) not found in CSV. Available years: $available_years")
+        end
+
+        scaled_weeks[model_year] = Dict{Symbol, Vector{Vector{Float64}}}()
+        purch_elec_prices[model_year] = Dict{Symbol, Matrix{Float64}}()
+        sale_elec_prices[model_year] = Dict{Symbol, Matrix{Float64}}()
+
+        # Process each scenario
+        for (csv_scenario, model_scenario) in scenario_map
+            # Filter data for this year/scenario
+            year_scen_df = filter(row -> row.year == csv_year && row.scenario_price == csv_scenario, df)
+
+            # Extract demand profiles for each week
+            demand_profiles = Vector{Vector{Float64}}()
+            price_matrix = zeros(n_weeks, hours_per_week)
+
+            for (week_idx, period) in enumerate(available_periods)
+                week_df = filter(row -> row.period == period, year_scen_df)
+                # Sort by hour to ensure correct ordering
+                sort!(week_df, :hour)
+
+                @assert nrow(week_df) == hours_per_week "Expected $hours_per_week hours for period $period, got $(nrow(week_df))"
+
+                # Extract demand (Load Profile column)
+                demand = Float64.(week_df[:, "Load Profile"])
+                push!(demand_profiles, demand)
+
+                # Extract prices and convert SEK → TSEK
+                prices = Float64.(week_df.price) ./ 1000.0
+                price_matrix[week_idx, :] = prices
+            end
+
+            # Scale demand to match base_annual_demand
+            # Annual demand = sum of (weekly demand × weight × hours_represented)
+            # Since weights are normalized to 52 weeks: annual = sum(weekly_sum × weight)
+            raw_annual_demand = sum(
+                sum(demand_profiles[w]) * week_weights_normalized[w]
+                for w in 1:n_weeks
+            )
+            scaling_factor = params.base_annual_demand / raw_annual_demand
+
+            # Apply scaling to demand profiles
+            scaled_demand = [round.(profile .* scaling_factor, digits=2) for profile in demand_profiles]
+            scaled_weeks[model_year][model_scenario] = scaled_demand
+
+            # Electricity prices: sale = spot price, purchase = spot + taxes
+            sale_elec_prices[model_year][model_scenario] = round.(price_matrix, digits=4)
+            purch_elec_prices[model_year][model_scenario] = round.(price_matrix .+ params.elec_taxes_levies, digits=4)
+        end
+
+        # Print summary for this year
+        mean_demand_low = mean(mean.(scaled_weeks[model_year][:low]))
+        mean_demand_high = mean(mean.(scaled_weeks[model_year][:high]))
+        mean_price_low = mean(sale_elec_prices[model_year][:low])
+        mean_price_high = mean(sale_elec_prices[model_year][:high])
+
+        println("  Year $model_year ($(csv_year)): demand low=$(round(mean_demand_low, digits=1)) high=$(round(mean_demand_high, digits=1)) MW, " *
+                "price low=$(round(mean_price_low, digits=3)) high=$(round(mean_price_high, digits=3)) TSEK/MWh")
     end
 
     return ProcessedData(
-        n_weeks, hours_per_week, representative_weeks, week_weights_normalized, scaled_weeks,
-        purch_elec_prices, sale_elec_prices
+        n_weeks, hours_per_week, week_weights_normalized,
+        scaled_weeks, purch_elec_prices, sale_elec_prices
     )
 end

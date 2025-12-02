@@ -16,6 +16,7 @@ struct ModelParameters
     salvage_fraction::Float64
     c_penalty::Float64
     elec_taxes_levies::Float64
+    n_typical_weeks::Int  # Number of typical weeks to use (1-6)
 
     # Technologies
     technologies::Vector{Symbol}
@@ -28,7 +29,6 @@ struct ModelParameters
     c_efficiency_el::Dict{Symbol,Float64}
     c_energy_carrier::Dict{Symbol,Symbol}
     c_lifetime_new::Dict{Symbol,Int}
-    c_lifetime_initial::Dict{Symbol,Int}
     c_capacity_limits::Dict{Symbol,Vector{Float64}}
 
     # Storage
@@ -44,7 +44,7 @@ struct ModelParameters
     carbon_trajectory::Vector{Float64}  # Single net-zero trajectory
     temp_scenarios::Vector{Symbol}
     temp_cop_multipliers::Dict{Symbol,Float64}
-    temp_demand_multipliers::Dict{Symbol,Float64}  # Demand multiplier per temperature scenario
+    temp_demand_multipliers::Dict{Symbol,Vector{Float64}}  # Year-varying demand multiplier per temperature scenario
     temp_scenario_probabilities::Dict{Int,Float64}
     energy_transitions::Matrix{Float64}
     initial_energy_dist::Vector{Float64}
@@ -94,6 +94,26 @@ function load_parameters(excel_path::String)
     c_penalty = round(Float64(get_param("c_penalty")) / 1000, digits=2)
     elec_taxes_levies = round(Float64(get_param("elec_taxes_levies")) / 1000, digits=2)
 
+    # Load n_typical_weeks (optional, default to 6)
+    n_typical_weeks_rows = config_df[config_df.parameter.=="n_typical_weeks", :value]
+    n_typical_weeks = isempty(n_typical_weeks_rows) ? 6 : Int(n_typical_weeks_rows[1])
+
+    # Helper function to calculate calendar year for a model year
+    # Year 1 → 2023, Year 2 → 2030, Year 3+ → 2030 + (m-2)*T_years
+    function model_year_to_calendar(m::Int)
+        if m == 1
+            return 2023
+        elseif m == 2
+            return 2030
+        else
+            return 2030 + (m - 2) * T_years
+        end
+    end
+
+    # Pre-calculate calendar years for all model years
+    calendar_years = [model_year_to_calendar(m) for m in 1:T]
+    println("  Calendar year mapping: ", join(["$m → $(calendar_years[m])" for m in 1:T], ", "))
+
     # Load Technologies sheet
     tech_sheet = xf["Technologies"]
     tech_df = DataFrame(XLSX.gettable(tech_sheet))
@@ -121,8 +141,14 @@ function load_parameters(excel_path::String)
     c_efficiency_th = Dict(zip(technologies, round.(Float64.(tech_df.efficiency_th), digits=4)))  # Keep 4 digits for efficiencies
     c_efficiency_el = Dict(zip(technologies, round.(Float64.(tech_df.efficiency_el), digits=4)))  # Keep 4 digits for efficiencies
     c_energy_carrier = Dict(zip(technologies, Symbol.(tech_df.energy_carrier)))
-    c_lifetime_new = Dict(zip(technologies, Int.(tech_df.lifetime_new)))
-    c_lifetime_initial = Dict(zip(technologies, Int.(tech_df.lifetime_initial)))
+    # Scale lifetime_new based on T_years (Excel values assume T_years=10)
+    # E.g., lifetime=3 with T_years=10 → 30 actual years
+    #       lifetime=6 with T_years=5  → 30 actual years (scaled by 10/T_years)
+    lifetime_scale = div(10, T_years)
+    c_lifetime_new = Dict(zip(technologies, Int.(tech_df.lifetime_new) .* lifetime_scale))
+    if lifetime_scale != 1
+        println("  Scaled lifetime_new by $lifetime_scale (T_years=$T_years)")
+    end
 
     # Load CapacityLimits sheet
     cap_limit_sheet = xf["CapacityLimits"]
@@ -149,7 +175,8 @@ function load_parameters(excel_path::String)
         limits = Float64[]
 
         for year in 1:T
-            col_name = get_year_col(cap_limit_df, "year_$(year)")
+            cal_year = calendar_years[year]
+            col_name = get_year_col(cap_limit_df, string(cal_year))
             limit_value = Float64(row[col_name])
 
             # Convert -1 to Inf (meaning no limit)
@@ -184,8 +211,11 @@ function load_parameters(excel_path::String)
         # Convert cost parameters from SEK to TSEK (÷1000)
         if param_name in [:capacity_cost, :fixed_om, :variable_om]
             storage_params[param_name] = round(value / 1000, digits=4)
+        elseif param_name == :lifetime
+            # Scale lifetime based on T_years (Excel values assume T_years=10)
+            storage_params[param_name] = round(value * lifetime_scale, digits=2)
         else
-            # Rates, efficiencies, lifetime, capacities - no conversion
+            # Rates, efficiencies, capacities - no conversion
             digits = (param_name in [:efficiency, :loss_rate, :max_charge_rate, :max_discharge_rate]) ? 4 : 2
             storage_params[param_name] = round(value, digits=digits)
         end
@@ -217,8 +247,12 @@ function load_parameters(excel_path::String)
     elec_ef_sheet = xf["Emission_Factor_for_electricity"]
     elec_ef_df = DataFrame(XLSX.gettable(elec_ef_sheet))
 
-    # Map model years to data years: 1→2023, 2→2030, 3→2040, 4→2050
-    year_mapping = Dict(1 => 2023, 2 => 2030, 3 => 2040, 4 => 2050)
+    # Map model years to data years (dynamic based on T_years)
+    # First year is always 2023, second is 2030, then 2030 + (m-2)*T_years
+    year_mapping = Dict{Int,Int}(1 => 2023, 2 => 2030)
+    for m in 3:T
+        year_mapping[m] = 2030 + (m - 2) * T_years
+    end
 
     # Extract column name for emission factor
     elec_ef_col_name = nothing
@@ -244,8 +278,16 @@ function load_parameters(excel_path::String)
     energy_price_sheet = xf["EnergyPriceMap"]
     energy_price_df = DataFrame(XLSX.gettable(energy_price_sheet))
 
-    # Map data years to model years
-    data_year_to_model = Dict(2023 => 1, 2030 => 2, 2040 => 3, 2050 => 4)
+    # Map data years to model years (dynamic based on T_years)
+    # First year is always 2023 (base year with data)
+    # Second year is always 2030
+    # Subsequent years: 2030 + (m-2)*T_years
+    # T_years=5:  2023, 2030, 2035, 2040
+    # T_years=10: 2023, 2030, 2040, 2050
+    data_year_to_model = Dict{Int,Int}(2023 => 1, 2030 => 2)
+    for m in 3:T
+        data_year_to_model[2030 + (m - 2) * T_years] = m
+    end
 
     # Identify carrier columns (all columns with brackets containing price units)
     carrier_cols = Symbol[]
@@ -311,10 +353,8 @@ function load_parameters(excel_path::String)
     # Load single carbon trajectory (net-zero path)
     # Convert to TSEK: SEK → TSEK (÷1000)
     carbon_trajectory = round.([
-            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_1")]) / 1000,
-            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_2")]) / 1000,
-            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_3")]) / 1000,
-            Float64(carbon_traj_df[1, find_col(carbon_traj_df, "year_4")]) / 1000
+            Float64(carbon_traj_df[1, find_col(carbon_traj_df, string(calendar_years[m]))]) / 1000
+            for m in 1:T
         ], digits=4)
 
     # Load TemperatureScenarios sheet
@@ -323,24 +363,65 @@ function load_parameters(excel_path::String)
     temp_scenarios = [Symbol(row.description) for row in eachrow(temp_scen_df)]
     temp_cop_multipliers = Dict(zip(temp_scenarios, round.(Float64.(temp_scen_df.cop_multiplier), digits=4)))
 
-    # Load demand_multiplier if present, otherwise default to 1.0
-    if "demand_multiplier" in names(temp_scen_df)
-        # Handle comma decimal separator (European locale)
-        demand_mult_values = Float64[]
-        for val in temp_scen_df.demand_multiplier
-            if val isa Number
-                push!(demand_mult_values, Float64(val))
-            else
-                # Replace comma with period for parsing
-                normalized = replace(string(val), "," => ".")
-                push!(demand_mult_values, parse(Float64, normalized))
-            end
+    # Load demand multipliers (year-varying or static)
+    # Helper function to parse values (handle comma decimal separator)
+    parse_demand_value(val) = begin
+        if val isa Number
+            return Float64(val)
+        else
+            normalized = replace(string(val), "," => ".")
+            return parse(Float64, normalized)
         end
-        temp_demand_multipliers = Dict(zip(temp_scenarios, round.(demand_mult_values, digits=4)))
-        println("  Loaded temperature scenario demand multipliers: $temp_demand_multipliers")
+    end
+
+    # Check for calendar year columns first (e.g., "2023", "2030", ...)
+    calendar_year_cols = [string(calendar_years[m]) for m in 1:T]
+    has_calendar_year_cols = all(col in names(temp_scen_df) for col in calendar_year_cols)
+
+    # Also check for legacy year_i_demand format
+    legacy_year_cols = ["year_$(i)_demand" for i in 1:T]
+    has_legacy_cols = all(col in names(temp_scen_df) for col in legacy_year_cols)
+
+    if has_calendar_year_cols
+        # Load year-varying demand multipliers from calendar year columns
+        temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
+        for row in eachrow(temp_scen_df)
+            scenario = Symbol(row.description)
+            demands = [parse_demand_value(row[col]) for col in calendar_year_cols]
+            temp_demand_multipliers[scenario] = round.(demands, digits=4)
+        end
+        println("  Loaded year-varying temperature demand multipliers:")
+        for (scen, demands) in temp_demand_multipliers
+            println("    $scen: $(demands)")
+        end
+    elseif has_legacy_cols
+        # Load from legacy year_i_demand format
+        temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
+        for row in eachrow(temp_scen_df)
+            scenario = Symbol(row.description)
+            demands = [parse_demand_value(row[col]) for col in legacy_year_cols]
+            temp_demand_multipliers[scenario] = round.(demands, digits=4)
+        end
+        println("  Loaded year-varying temperature demand multipliers (legacy format):")
+        for (scen, demands) in temp_demand_multipliers
+            println("    $scen: $(demands)")
+        end
+    elseif "demand_multiplier" in names(temp_scen_df)
+        # Backward compatibility: static multiplier replicated across years
+        temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
+        for row in eachrow(temp_scen_df)
+            scenario = Symbol(row.description)
+            value = parse_demand_value(row.demand_multiplier)
+            temp_demand_multipliers[scenario] = fill(round(value, digits=4), T)
+        end
+        println("  Loaded static temperature demand multipliers (replicated across $T years):")
+        for (scen, demands) in temp_demand_multipliers
+            println("    $scen: $(demands)")
+        end
     else
-        temp_demand_multipliers = Dict(scen => 1.0 for scen in temp_scenarios)
-        println("  No demand_multiplier column in TemperatureScenarios - using default 1.0")
+        # Default: 1.0 for all years and scenarios
+        temp_demand_multipliers = Dict(scen => fill(1.0, T) for scen in temp_scenarios)
+        println("  No demand multiplier columns - using default 1.0 for all years")
     end
 
     # Load TemperatureProbabilities sheet
@@ -370,7 +451,7 @@ function load_parameters(excel_path::String)
         schedule_df = DataFrame(XLSX.gettable(xf["ExistingCapacitySchedule"]))
         for row in eachrow(schedule_df)
             tech = Symbol(row.technology)
-            schedule = [Float64(row[Symbol("year_$i")]) for i in 1:T]
+            schedule = [Float64(row[Symbol(string(calendar_years[i]))]) for i in 1:T]
             c_existing_capacity_schedule[tech] = schedule
         end
         println("  Loaded retirement schedules for $(length(c_existing_capacity_schedule)) technologies")
@@ -384,7 +465,7 @@ function load_parameters(excel_path::String)
         eff_df = DataFrame(XLSX.gettable(xf["WasteChpEfficiency"]))
         if nrow(eff_df) > 0
             for i in 1:T
-                waste_chp_efficiency_schedule[i] = Float64(eff_df[1, Symbol("year_$i")])
+                waste_chp_efficiency_schedule[i] = Float64(eff_df[1, Symbol(string(calendar_years[i]))])
             end
             println("  Loaded Waste_CHP time-varying efficiency")
         end
@@ -393,19 +474,20 @@ function load_parameters(excel_path::String)
     end
 
     # Load waste fuel availability constraint
+    # Excel values are in GWh, model uses MWh → multiply by 1000
     waste_availability = zeros(Float64, T)
     if "WasteAvailability" in XLSX.sheetnames(xf)
         avail_df = DataFrame(XLSX.gettable(xf["WasteAvailability"]))
         if nrow(avail_df) > 0
             for i in 1:T
-                waste_availability[i] = Float64(avail_df[1, Symbol("year_$i")])
+                waste_availability[i] = Float64(avail_df[1, Symbol(string(calendar_years[i]))]) * 1000  # GWh → MWh
             end
-            println("  Loaded waste availability constraints")
+            println("  Loaded waste availability constraints (converted GWh → MWh)")
         end
     else
         println("  WARNING: 'WasteAvailability' sheet not found - no waste fuel constraint will be applied")
         # Set to large values so constraint is non-binding
-        waste_availability = fill(1e6, T)
+        waste_availability = fill(1e9, T)  # 1e9 MWh = very large
     end
 
     # Load Extreme Events (optional)
@@ -484,10 +566,10 @@ function load_parameters(excel_path::String)
 
     return ModelParameters(
         T, T_years, discount_rate, base_annual_demand, salvage_fraction,
-        c_penalty, elec_taxes_levies,
+        c_penalty, elec_taxes_levies, n_typical_weeks,
         technologies, c_initial_capacity, c_max_additional_capacity,
         c_investment_cost, c_opex_fixed, c_opex_var, c_efficiency_th,
-        c_efficiency_el, c_energy_carrier, c_lifetime_new, c_lifetime_initial,
+        c_efficiency_el, c_energy_carrier, c_lifetime_new,
         c_capacity_limits,
         storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
         energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_demand_multipliers, temp_scenario_probabilities,
