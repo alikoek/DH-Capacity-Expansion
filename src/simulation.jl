@@ -222,8 +222,9 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             println(io, "    Total Alive Capacity = ", round(alive_storage, digits=2), " MWh")
 
         else  # Operational stages
-            vprint("Year $(div(t, 2)) - Operational Stage")
-            println(io, "Year $(div(t, 2)) - Operational Stage")
+            current_year = div(t, 2)
+            vprint("Year $current_year - Operational Stage")
+            println(io, "Year $current_year - Operational Stage")
 
             # Check for extreme event information
             if params.enable_extreme_events && t == params.apply_to_year * 2
@@ -258,9 +259,14 @@ function export_results(simulations, params::ModelParameters, data::ProcessedDat
             end
 
             # Calculate total annual demand across all representative weeks
+            # Extract Markov state from simulation to get correct scenario-specific demand
+            t_sim, markov_state = sp[:node_index]
+            energy_state, temp_scenario = decode_markov_state(t_sim, markov_state)
+            scenario_sym = [:high, :medium, :low][energy_state]
+
             annual_demand = 0.0
             for week in 1:data.n_weeks
-                week_demand = sum(data.scaled_weeks[week])
+                week_demand = sum(data.scaled_weeks[current_year][scenario_sym][week])
                 annual_demand += week_demand * data.week_weights_normalized[week]
             end
 
@@ -393,7 +399,8 @@ function print_summary_statistics(simulations, params::ModelParameters, data::Pr
     std_cost = std(total_costs)
     cvar_95_cost = quantile(total_costs, 0.95)
 
-    println("\nTotal System Cost (billion SEK / GSEK):")
+    # Cost units: internal = TSEK, displayed = GSEK (= billion SEK = 10^6 TSEK)
+    println("\nTotal System Cost (GSEK):")
     println("  Mean: $(round(mean_cost/1e6, digits=2))")
     println("  Std Dev: $(round(std_cost/1e6, digits=2))")
     println("  CVaR 95%: $(round(cvar_95_cost/1e6, digits=2))")

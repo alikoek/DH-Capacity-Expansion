@@ -41,10 +41,15 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
 
             sp = simulations[sim][op_stage]
 
-            # Calculate annual demand
+            # Extract Markov state from simulation to get correct scenario-specific demand
+            t_sim, markov_state = sp[:node_index]
+            energy_state, temp_scenario = decode_markov_state(t_sim, markov_state)
+            scenario_sym = [:high, :medium, :low][energy_state]
+
+            # Calculate annual demand using scenario-specific demand
             annual_demand = 0.0
             for week in 1:data.n_weeks
-                week_demand = sum(data.scaled_weeks[week])
+                week_demand = sum(data.scaled_weeks[year][scenario_sym][week])
                 annual_demand += week_demand * data.week_weights_normalized[week]
             end
 
