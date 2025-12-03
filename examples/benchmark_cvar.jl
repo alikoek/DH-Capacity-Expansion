@@ -17,6 +17,8 @@ using SDDP
 using Statistics
 using Dates
 using Random
+using Plots
+using StatsPlots
 
 println("="^70)
 println("BENCHMARK: Risk-Averse VSS with CVaR(0.95)")
@@ -81,7 +83,9 @@ SDDP.train(sddp_model;
     iteration_limit=ITERATION_LIMIT_SDDP,
     print_level=1,
     log_frequency=25,
-    run_numerical_stability_report=false
+    run_numerical_stability_report=true,  # Monitor coefficient ranges
+    cut_deletion_minimum=100,  # Prevent cut accumulation causing numerical instability
+    parallel_scheme=SDDP.Threaded()  # Enable multithreaded training
 )
 sddp_training_time = time() - sddp_start_time
 
@@ -207,9 +211,88 @@ else
 end
 
 ##############################################################################
-# Save Results
+# PART 5: Visualizations
 ##############################################################################
 
+println("\n" * "="^70)
+println("PART 5: CREATING VISUALIZATIONS")
+println("="^70)
+
+# Extract first-stage investments for comparison
+sddp_investments = Dict{Symbol,Float64}()
+for tech in params.technologies
+    inv_values = [sim[1][:u_expansion_tech][tech] for sim in sddp_simulations]
+    sddp_investments[tech] = mean(inv_values)
+end
+
+ev_investments_first = ev_investments[1][:tech]
+
+# Plot 1: Cost distribution comparison (violin plot)
+p1 = violin([1], sddp_costs / 1e6, label="CVaR-SDDP", fillalpha=0.7, color=:steelblue)
+violin!([2], eev_costs / 1e6, label="EV Policy", fillalpha=0.7, color=:coral)
+xlabel!("Policy")
+ylabel!("Total Cost (MSEK)")
+title!("Cost Distribution: CVaR-SDDP vs EV Policy")
+xticks!([1, 2], ["CVaR-SDDP\n(RP)", "EV Policy\n(EEV)"])
+
+# Add mean and CVaR lines
+hline!([RP_mean / 1e6], color=:steelblue, linestyle=:dash, label="RP mean", linewidth=2)
+hline!([RP_cvar / 1e6], color=:steelblue, linestyle=:dot, label="RP CVaR", linewidth=2)
+hline!([EEV_mean / 1e6], color=:coral, linestyle=:dash, label="EEV mean", linewidth=2)
+hline!([EEV_cvar / 1e6], color=:coral, linestyle=:dot, label="EEV CVaR", linewidth=2)
+
+# Plot 2: First-stage investment comparison
+techs_to_plot = filter(t -> sddp_investments[t] > 0.1 || ev_investments_first[t] > 0.1, params.technologies)
+if !isempty(techs_to_plot)
+    tech_names = [String(t) for t in techs_to_plot]
+    sddp_invs = [sddp_investments[t] for t in techs_to_plot]
+    ev_invs = [ev_investments_first[t] for t in techs_to_plot]
+
+    x = 1:length(techs_to_plot)
+    p2 = groupedbar([sddp_invs ev_invs],
+        bar_position=:dodge,
+        xlabel="Technology",
+        ylabel="Investment (MW)",
+        title="First-Stage Investments",
+        label=["CVaR-SDDP" "EV Model"],
+        xticks=(x, tech_names),
+        xrotation=45,
+        legend=:topright,
+        color=[:steelblue :coral],
+        alpha=0.8
+    )
+else
+    p2 = plot(title="No significant first-stage investments", legend=false)
+end
+
+# Combine plots
+combined = plot(p1, p2, layout=(1, 2), size=(1200, 500),
+    plot_title="Risk-Averse VSS Analysis: CVaR-SDDP vs EV Model")
+
+output_plot = joinpath(OUTPUT_DIR, "benchmark_cvar_comparison.png")
+savefig(combined, output_plot)
+println("Comparison plot saved to: $output_plot")
+
+##############################################################################
+# PART 6: Save Results
+##############################################################################
+
+println("\n" * "="^70)
+println("PART 6: SAVING RESULTS")
+println("="^70)
+
+# Save simulation results for future analysis
+println("\nSaving simulation data...")
+sddp_file = joinpath(OUTPUT_DIR, "cvar_sddp_simulations_$(Dates.format(now(), "yyyy_mm_dd_HHMM")).jld2")
+save_simulation_results(sddp_simulations, params, data, sddp_file)
+println("  CVaR-SDDP results saved to: $(basename(sddp_file))")
+
+eev_file = joinpath(OUTPUT_DIR, "cvar_eev_simulations_$(Dates.format(now(), "yyyy_mm_dd_HHMM")).jld2")
+save_simulation_results(eev_simulations, params, data, eev_file)
+println("  EEV results saved to: $(basename(eev_file))")
+
+# Save detailed text report
+println("\nSaving detailed report...")
 report_path = joinpath(OUTPUT_DIR, "benchmark_cvar_summary.txt")
 open(report_path, "w") do io
     println(io, "="^70)
@@ -230,10 +313,33 @@ open(report_path, "w") do io
     println(io, "\nVSS:")
     println(io, "  VSS (mean):    $(round(VSS_mean/1e6, digits=3)) MSEK ($(round(VSS_mean_pct, digits=2))%)")
     println(io, "  VSS (CVaR):    $(round(VSS_cvar/1e6, digits=3)) MSEK ($(round(VSS_cvar_pct, digits=2))%)")
+    println(io, "\nFIRST-STAGE INVESTMENTS:")
+    println(io, "  Technology              CVaR-SDDP (MW)    EV (MW)    Difference")
+    println(io, "  " * "-"^63)
+    for tech in params.technologies
+        if sddp_investments[tech] > 0.1 || ev_investments_first[tech] > 0.1
+            sddp_inv = sddp_investments[tech]
+            ev_inv = ev_investments_first[tech]
+            diff = sddp_inv - ev_inv
+            println(io, "  $(rpad(String(tech), 20))  $(lpad(round(sddp_inv, digits=1), 14))  $(lpad(round(ev_inv, digits=1), 10))  $(lpad(round(diff, digits=1), 10))")
+        end
+    end
+    println(io, "\nINTERPRETATION:")
+    if VSS_cvar > VSS_mean
+        println(io, "  - CVaR-based VSS is HIGHER than mean-based VSS")
+        println(io, "  - Risk-averse SDDP provides $(round((VSS_cvar - VSS_mean)/1e6, digits=2)) MSEK extra value in tail scenarios")
+    else
+        println(io, "  - CVaR-based VSS is similar to or lower than mean-based VSS")
+    end
     println(io, "="^70)
 end
-println("\nReport saved to: $report_path")
+println("Report saved to: $report_path")
 
 println("\n" * "="^70)
 println("BENCHMARK COMPLETE")
 println("="^70)
+println("\nOutputs saved to: $OUTPUT_DIR")
+println("  - benchmark_cvar_comparison.png (visualization)")
+println("  - benchmark_cvar_summary.txt (text report)")
+println("  - cvar_sddp_simulations_*.jld2 (SDDP simulation data)")
+println("  - cvar_eev_simulations_*.jld2 (EEV simulation data)")
