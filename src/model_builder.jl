@@ -472,11 +472,13 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
             local purch_elec_price = data.purch_elec_prices[model_year][scenario]
             local sale_elec_price = data.sale_elec_prices[model_year][scenario]
 
-            # Apply temperature-dependent COP multipliers to HeatPump efficiency
-            temp_scenario_symbol = params.temp_scenarios[temp_scenario]
-            cop_multiplier = params.temp_cop_multipliers[temp_scenario_symbol]
+            # Get calendar year for COP lookup
+            calendar_year = params.calendar_years[model_year]
 
-            # Create adjusted efficiencies (temperature and time-varying)
+            # Get temperature scenario symbol for COP lookup
+            temp_scenario_symbol = params.temp_scenarios[temp_scenario]
+
+            # Create adjusted efficiencies (technology-specific and time-varying)
             efficiency_th_adjusted = Dict{Symbol, Float64}()
             for tech in params.technologies
                 # Start with base efficiency
@@ -487,9 +489,10 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                     base_eff = params.waste_chp_efficiency_schedule[model_year]
                 end
 
-                # Apply temperature-dependent COP multiplier for heat pumps
-                if occursin("HeatPump", string(tech))
-                    efficiency_th_adjusted[tech] = base_eff * cop_multiplier
+                # Apply technology-specific, temperature-scenario-dependent, year-varying COP for heat pumps
+                if haskey(params.heatpump_cop_trajectories, temp_scenario_symbol) &&
+                   haskey(params.heatpump_cop_trajectories[temp_scenario_symbol], tech)
+                    efficiency_th_adjusted[tech] = params.heatpump_cop_trajectories[temp_scenario_symbol][tech][calendar_year]
                 else
                     efficiency_th_adjusted[tech] = base_eff
                 end

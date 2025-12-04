@@ -152,13 +152,16 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
 
                     # Get efficiency based on technology type and temperature scenario
                     carrier = params.c_energy_carrier[tech]
+                    calendar_year = params.calendar_years[model_year]
+                    temp_scenario_symbol = params.temp_scenarios[temp_scenario]
+
                     if tech == :Waste_CHP && params.waste_chp_efficiency_schedule[model_year] > 0.0
                         # Time-varying efficiency for Waste_CHP
                         efficiency_th = params.waste_chp_efficiency_schedule[model_year]
-                    elseif occursin("HeatPump", string(tech))
-                        # Use COP multiplier from realized temperature scenario
-                        cop_mult = params.temp_cop_multipliers[params.temp_scenarios[temp_scenario]]
-                        efficiency_th = params.c_efficiency_th[tech] * cop_mult
+                    elseif haskey(params.heatpump_cop_trajectories, temp_scenario_symbol) &&
+                           haskey(params.heatpump_cop_trajectories[temp_scenario_symbol], tech)
+                        # Use technology-specific, temperature-scenario-dependent, year-varying COP
+                        efficiency_th = params.heatpump_cop_trajectories[temp_scenario_symbol][tech][calendar_year]
                     else
                         efficiency_th = params.c_efficiency_th[tech]
                     end

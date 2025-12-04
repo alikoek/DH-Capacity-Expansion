@@ -37,22 +37,40 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     # ========================================================================
     println("    Step 1: Calculating expected values...")
 
-    # 1a. Expected COP and year-varying expected demand multiplier from temperature scenarios
-    expected_cop = 0.0
+    # 1a. Year-varying expected demand multiplier from temperature scenarios
     expected_temp_demand_mult = zeros(params.T)  # Year-varying expected demand multiplier
 
     for (idx, scenario_symbol) in enumerate(params.temp_scenarios)
         prob = params.temp_scenario_probabilities[idx]
-        cop = params.temp_cop_multipliers[scenario_symbol]
-        demand_mult_vec = params.temp_demand_multipliers[scenario_symbol]  # Now a Vector
+        demand_mult_vec = params.temp_demand_multipliers[scenario_symbol]  # Vector
 
-        expected_cop += cop * prob
         expected_temp_demand_mult .+= demand_mult_vec .* prob
 
-        println("      Temp scenario $idx ($scenario_symbol): COP=$cop, demand=$(demand_mult_vec), prob=$prob")
+        println("      Temp scenario $idx ($scenario_symbol): demand=$(demand_mult_vec), prob=$prob")
     end
-    println("      → Expected COP: $(round(expected_cop, digits=3))")
     println("      → Expected demand multiplier (year-varying): $(round.(expected_temp_demand_mult, digits=3))")
+
+    # 1a-bis. Calculate expected COP per technology per year
+    # Structure: tech -> calendar_year -> expected_cop
+    expected_heatpump_cops = Dict{Symbol,Dict{Int,Float64}}()
+
+    # Get all heat pump technologies from the first scenario
+    first_scenario = first(keys(params.heatpump_cop_trajectories))
+    for tech in keys(params.heatpump_cop_trajectories[first_scenario])
+        expected_heatpump_cops[tech] = Dict{Int,Float64}()
+        for model_year in 1:params.T
+            cal_year = params.calendar_years[model_year]
+            expected_cop = 0.0
+            for (idx, scenario_symbol) in enumerate(params.temp_scenarios)
+                prob = params.temp_scenario_probabilities[idx]
+                cop = params.heatpump_cop_trajectories[scenario_symbol][tech][cal_year]
+                expected_cop += cop * prob
+            end
+            expected_heatpump_cops[tech][cal_year] = round(expected_cop, digits=4)
+        end
+        cop_values = [expected_heatpump_cops[tech][params.calendar_years[m]] for m in 1:params.T]
+        println("      Expected COP $tech: $(cop_values)")
+    end
 
     # 1b. Time-dependent energy price distributions starting from Medium state
     # This matches SDDP which starts from Medium (state 2) and evolves through Markov chain
@@ -140,6 +158,13 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     # ========================================================================
     println("\n    Step 2: Creating new ModelParameters struct...")
 
+    # Build expected COP trajectories structure for EV model
+    # Both scenarios use the same expected COPs (deterministic)
+    ev_heatpump_cops = Dict{Symbol,Dict{Symbol,Dict{Int,Float64}}}()
+    for scenario in [:Expected_High, :Expected_Low]
+        ev_heatpump_cops[scenario] = expected_heatpump_cops  # Same expected COPs for both
+    end
+
     ev_params = ModelParameters(
         # Model configuration (unchanged)
         params.T,
@@ -150,6 +175,7 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         params.c_penalty,
         params.elec_taxes_levies,
         params.n_typical_weeks,
+        params.calendar_years,
 
         # Technologies (unchanged)
         params.technologies,
@@ -176,11 +202,11 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         ev_energy_map,                                    # Expected prices (all states same)
         params.carbon_trajectory,                         # Unchanged
         [:Expected_High, :Expected_Low],                  # Keep 2 scenarios with same values
-        Dict(:Expected_High => expected_cop, :Expected_Low => expected_cop),  # Same COP for both
         Dict(:Expected_High => expected_temp_demand_mult, :Expected_Low => expected_temp_demand_mult),  # Same demand mult for both
         Dict(1 => 0.5, 2 => 0.5),                        # Equal probabilities (will collapse to same result)
         [1.0 0.0 0.0; 1.0 0.0 0.0; 1.0 0.0 0.0],         # Deterministic transitions to state 1
         [1.0, 0.0, 0.0],                                 # Always start in state 1
+        ev_heatpump_cops,                                # Expected COPs per technology per year
 
         # Investment stages (unchanged)
         params.investment_stages,
@@ -274,7 +300,8 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
     println("\n  Structure:")
     println("    - Stages: $(2 * ev_params.T)")
     println("    - Nodes: $(length(ev_model.nodes)) (same tree structure as SDDP, identical values on all branches)")
-    println("    - Temperature scenarios: 1 (expected COP = $(round(expected_cop, digits=2)), demand mult = $(round.(expected_temp_demand_mult, digits=2)))")
+    println("    - Temperature scenarios: 1 (expected demand mult = $(round.(expected_temp_demand_mult, digits=2)))")
+    println("    - Heat pump COPs: expected values per technology (see above)")
     println("    - Energy states: 1 (time-dependent, starting from Medium)")
 
     return ev_model, ev_params, ev_data

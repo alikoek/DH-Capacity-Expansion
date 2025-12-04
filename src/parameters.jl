@@ -17,6 +17,7 @@ struct ModelParameters
     c_penalty::Float64
     elec_taxes_levies::Float64
     n_typical_weeks::Int  # Number of typical weeks to use (1-6)
+    calendar_years::Vector{Int}  # Mapping: model_year -> calendar_year (e.g., [2023, 2030, 2035, ...])
 
     # Technologies
     technologies::Vector{Symbol}
@@ -43,11 +44,14 @@ struct ModelParameters
     energy_price_map::Dict{Int,Dict{Int,Dict{Symbol,Float64}}}
     carbon_trajectory::Vector{Float64}  # Single net-zero trajectory
     temp_scenarios::Vector{Symbol}
-    temp_cop_multipliers::Dict{Symbol,Float64}
     temp_demand_multipliers::Dict{Symbol,Vector{Float64}}  # Year-varying demand multiplier per temperature scenario
     temp_scenario_probabilities::Dict{Int,Float64}
     energy_transitions::Matrix{Float64}
     initial_energy_dist::Vector{Float64}
+
+    # Heat pump COP trajectories (temperature-scenario and technology-specific, year-varying)
+    # Structure: temp_scenario -> tech -> calendar_year -> COP
+    heatpump_cop_trajectories::Dict{Symbol,Dict{Symbol,Dict{Int,Float64}}}
 
     # Investment stages
     investment_stages::Vector{Int}
@@ -361,11 +365,9 @@ function load_parameters(excel_path::String)
     temp_scen_sheet = xf["TemperatureScenarios"]
     temp_scen_df = DataFrame(XLSX.gettable(temp_scen_sheet))
     temp_scenarios = [Symbol(row.description) for row in eachrow(temp_scen_df)]
-    temp_cop_multipliers = Dict(zip(temp_scenarios, round.(Float64.(temp_scen_df.cop_multiplier), digits=4)))
 
-    # Load demand multipliers (year-varying or static)
     # Helper function to parse values (handle comma decimal separator)
-    parse_demand_value(val) = begin
+    parse_temp_value(val) = begin
         if val isa Number
             return Float64(val)
         else
@@ -374,7 +376,7 @@ function load_parameters(excel_path::String)
         end
     end
 
-    # Check for calendar year columns first (e.g., "2023", "2030", ...)
+    # Check for calendar year columns for demand multipliers
     calendar_year_cols = [string(calendar_years[m]) for m in 1:T]
     has_calendar_year_cols = all(col in names(temp_scen_df) for col in calendar_year_cols)
 
@@ -387,7 +389,7 @@ function load_parameters(excel_path::String)
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
             scenario = Symbol(row.description)
-            demands = [parse_demand_value(row[col]) for col in calendar_year_cols]
+            demands = [parse_temp_value(row[col]) for col in calendar_year_cols]
             temp_demand_multipliers[scenario] = round.(demands, digits=4)
         end
         println("  Loaded year-varying temperature demand multipliers:")
@@ -399,7 +401,7 @@ function load_parameters(excel_path::String)
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
             scenario = Symbol(row.description)
-            demands = [parse_demand_value(row[col]) for col in legacy_year_cols]
+            demands = [parse_temp_value(row[col]) for col in legacy_year_cols]
             temp_demand_multipliers[scenario] = round.(demands, digits=4)
         end
         println("  Loaded year-varying temperature demand multipliers (legacy format):")
@@ -411,7 +413,7 @@ function load_parameters(excel_path::String)
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
             scenario = Symbol(row.description)
-            value = parse_demand_value(row.demand_multiplier)
+            value = parse_temp_value(row.demand_multiplier)
             temp_demand_multipliers[scenario] = fill(round(value, digits=4), T)
         end
         println("  Loaded static temperature demand multipliers (replicated across $T years):")
@@ -490,6 +492,74 @@ function load_parameters(excel_path::String)
         waste_availability = fill(1e9, T)  # 1e9 MWh = very large
     end
 
+    # Load HeatPumpCOP sheet (temperature-scenario, technology-specific, year-varying COP values)
+    # Structure: temp_scenario -> tech -> calendar_year -> COP
+    heatpump_cop_trajectories = Dict{Symbol,Dict{Symbol,Dict{Int,Float64}}}()
+
+    if "HeatPumpCOP" in XLSX.sheetnames(xf)
+        cop_df = DataFrame(XLSX.gettable(xf["HeatPumpCOP"]))
+
+        # Row 1 in Excel = "High Temperature" = High-temp DH scenario
+        # Row 2 in Excel = "Low Temperature" = Low-temp DH scenario
+        high_temp_scenario = temp_scenarios[1]  # First scenario is High_Temp
+        low_temp_scenario = temp_scenarios[2]   # Second scenario is Low_Temp
+
+        # Low-temp DH scenario: COPs increase over time (from HeatPumpCOP sheet)
+        heatpump_cop_trajectories[low_temp_scenario] = Dict{Symbol,Dict{Int,Float64}}()
+
+        for row in eachrow(cop_df)
+            tech = Symbol(row.technology)
+            cop_by_year = Dict{Int,Float64}()
+            for i in 1:T
+                cal_year = calendar_years[i]
+                col_name = Symbol(string(cal_year))
+                cop_by_year[cal_year] = round(Float64(row[col_name]), digits=4)
+            end
+            heatpump_cop_trajectories[low_temp_scenario][tech] = cop_by_year
+        end
+
+        # High-temp DH scenario: COPs stay constant at 2023 values
+        heatpump_cop_trajectories[high_temp_scenario] = Dict{Symbol,Dict{Int,Float64}}()
+
+        first_year = calendar_years[1]  # 2023
+        for row in eachrow(cop_df)
+            tech = Symbol(row.technology)
+            first_year_cop = round(Float64(row[Symbol(string(first_year))]), digits=4)
+            cop_by_year = Dict{Int,Float64}()
+            for i in 1:T
+                cal_year = calendar_years[i]
+                cop_by_year[cal_year] = first_year_cop  # Keep constant
+            end
+            heatpump_cop_trajectories[high_temp_scenario][tech] = cop_by_year
+        end
+
+        println("  Loaded heat pump COP trajectories:")
+        for (scenario, techs) in heatpump_cop_trajectories
+            println("    $scenario:")
+            for (tech, cops) in techs
+                cop_values = [cops[calendar_years[i]] for i in 1:T]
+                println("      $tech: $(cop_values)")
+            end
+        end
+    else
+        # Fallback: use efficiency_th from Technologies sheet as constant COP for heat pumps
+        println("  WARNING: 'HeatPumpCOP' sheet not found - using efficiency_th as constant COP for heat pumps")
+        for scenario in temp_scenarios
+            heatpump_cop_trajectories[scenario] = Dict{Symbol,Dict{Int,Float64}}()
+            for tech in technologies
+                if occursin("HeatPump", string(tech))
+                    cop_value = c_efficiency_th[tech]
+                    cop_by_year = Dict{Int,Float64}()
+                    for i in 1:T
+                        cop_by_year[calendar_years[i]] = cop_value
+                    end
+                    heatpump_cop_trajectories[scenario][tech] = cop_by_year
+                    println("    $scenario / $tech: constant COP = $cop_value")
+                end
+            end
+        end
+    end
+
     # Load Extreme Events (optional)
     enable_extreme_events = false
     apply_to_year = 2  # Default to Year 2
@@ -566,14 +636,15 @@ function load_parameters(excel_path::String)
 
     return ModelParameters(
         T, T_years, discount_rate, base_annual_demand, salvage_fraction,
-        c_penalty, elec_taxes_levies, n_typical_weeks,
+        c_penalty, elec_taxes_levies, n_typical_weeks, calendar_years,
         technologies, c_initial_capacity, c_max_additional_capacity,
         c_investment_cost, c_opex_fixed, c_opex_var, c_efficiency_th,
         c_efficiency_el, c_energy_carrier, c_lifetime_new,
         c_capacity_limits,
         storage_params, storage_capacity_limits, c_emission_fac, elec_emission_factors,
-        energy_price_map, carbon_trajectory, temp_scenarios, temp_cop_multipliers, temp_demand_multipliers, temp_scenario_probabilities,
+        energy_price_map, carbon_trajectory, temp_scenarios, temp_demand_multipliers, temp_scenario_probabilities,
         energy_transitions, initial_energy_dist,
+        heatpump_cop_trajectories,
         investment_stages,
         c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability,
         enable_extreme_events, apply_to_year, extreme_events
