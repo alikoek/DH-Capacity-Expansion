@@ -59,6 +59,7 @@ struct ModelParameters
     # Existing capacity retirement and time-varying parameters
     c_existing_capacity_schedule::Dict{Symbol,Vector{Float64}}
     waste_chp_efficiency_schedule::Vector{Float64}
+    waste_emission_factor_schedule::Vector{Float64}  # Time-varying waste EF linked to efficiency
     waste_availability::Vector{Float64}
 
     # Extreme events (optional)
@@ -158,15 +159,34 @@ function load_parameters(excel_path::String)
     cap_limit_sheet = xf["CapacityLimits"]
     cap_limit_df = DataFrame(XLSX.gettable(cap_limit_sheet))
 
-    # Helper function to get column name for a year (handles bracket notation)
+    # Helper function to get column name for a year (handles bracket notation with units)
     function get_year_col(df, base_name)
         for col_name in names(df)
-            col_base = occursin('[', col_name) ? split(col_name, '[')[1] : col_name
+            col_base = occursin('[', col_name) ? strip(split(col_name, '[')[1]) : col_name
             if col_base == base_name
                 return col_name
             end
         end
-        error("Column starting with '$base_name' not found in CapacityLimits sheet")
+        error("Column starting with '$base_name' not found")
+    end
+
+    # Helper function to find column starting with base name (handles units in brackets/parentheses)
+    function find_col_startswith(df, base_name)
+        for col_name in names(df)
+            col_lower = lowercase(string(col_name))
+            base_lower = lowercase(base_name)
+            # Check if column starts with base_name (ignoring units in brackets)
+            if startswith(col_lower, base_lower)
+                return Symbol(col_name)
+            end
+        end
+        error("Column starting with '$base_name' not found")
+    end
+
+    # Helper to get value from row with flexible column name matching
+    function get_row_value(row, base_name)
+        col_sym = find_col_startswith(parent(row), base_name)
+        return row[col_sym]
     end
 
     # Build capacity limits dictionary: tech -> [year_1, year_2, ..., year_T]
@@ -175,7 +195,7 @@ function load_parameters(excel_path::String)
     storage_capacity_limits = Float64[]
 
     for row in eachrow(cap_limit_df)
-        tech_or_storage = String(row.technology)
+        tech_or_storage = String(get_row_value(row, "technology"))
         limits = Float64[]
 
         for year in 1:T
@@ -364,7 +384,9 @@ function load_parameters(excel_path::String)
     # Load TemperatureScenarios sheet
     temp_scen_sheet = xf["TemperatureScenarios"]
     temp_scen_df = DataFrame(XLSX.gettable(temp_scen_sheet))
-    temp_scenarios = [Symbol(row.description) for row in eachrow(temp_scen_df)]
+    # Get description column (may have units in name like "description (demand_multiplier [-])")
+    desc_col = find_col_startswith(temp_scen_df, "description")
+    temp_scenarios = [Symbol(row[desc_col]) for row in eachrow(temp_scen_df)]
 
     # Helper function to parse values (handle comma decimal separator)
     parse_temp_value(val) = begin
@@ -388,7 +410,7 @@ function load_parameters(excel_path::String)
         # Load year-varying demand multipliers from calendar year columns
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
-            scenario = Symbol(row.description)
+            scenario = Symbol(row[desc_col])
             demands = [parse_temp_value(row[col]) for col in calendar_year_cols]
             temp_demand_multipliers[scenario] = round.(demands, digits=4)
         end
@@ -400,7 +422,7 @@ function load_parameters(excel_path::String)
         # Load from legacy year_i_demand format
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
-            scenario = Symbol(row.description)
+            scenario = Symbol(row[desc_col])
             demands = [parse_temp_value(row[col]) for col in legacy_year_cols]
             temp_demand_multipliers[scenario] = round.(demands, digits=4)
         end
@@ -412,7 +434,7 @@ function load_parameters(excel_path::String)
         # Backward compatibility: static multiplier replicated across years
         temp_demand_multipliers = Dict{Symbol,Vector{Float64}}()
         for row in eachrow(temp_scen_df)
-            scenario = Symbol(row.description)
+            scenario = Symbol(row[desc_col])
             value = parse_temp_value(row.demand_multiplier)
             temp_demand_multipliers[scenario] = fill(round(value, digits=4), T)
         end
@@ -451,8 +473,9 @@ function load_parameters(excel_path::String)
     c_existing_capacity_schedule = Dict{Symbol,Vector{Float64}}()
     if "ExistingCapacitySchedule" in XLSX.sheetnames(xf)
         schedule_df = DataFrame(XLSX.gettable(xf["ExistingCapacitySchedule"]))
+        tech_col = find_col_startswith(schedule_df, "technology")
         for row in eachrow(schedule_df)
-            tech = Symbol(row.technology)
+            tech = Symbol(row[tech_col])
             schedule = [Float64(row[Symbol(string(calendar_years[i]))]) for i in 1:T]
             c_existing_capacity_schedule[tech] = schedule
         end
@@ -461,18 +484,46 @@ function load_parameters(excel_path::String)
         println("  WARNING: 'ExistingCapacitySchedule' sheet not found - using zero existing capacity")
     end
 
-    # Load Waste_CHP time-varying efficiency
+    # Load Waste_CHP time-varying efficiency and emission factors from same sheet
+    # Sheet structure: parameter | 2023 | 2030 | 2035 | ... with rows for efficiency and emission_factor
+    # Row names include units: "efficiency [-]" and "emission_factor [tCO2/MWh]"
     waste_chp_efficiency_schedule = zeros(Float64, T)
+    waste_emission_factor_schedule = zeros(Float64, T)
+
     if "WasteChpEfficiency" in XLSX.sheetnames(xf)
-        eff_df = DataFrame(XLSX.gettable(xf["WasteChpEfficiency"]))
-        if nrow(eff_df) > 0
+        waste_df = DataFrame(XLSX.gettable(xf["WasteChpEfficiency"]))
+
+        # Load efficiency (row where parameter starts with "efficiency")
+        eff_row = findfirst(row -> startswith(lowercase(string(row.parameter)), "efficiency"), eachrow(waste_df))
+        if eff_row !== nothing
             for i in 1:T
-                waste_chp_efficiency_schedule[i] = Float64(eff_df[1, Symbol(string(calendar_years[i]))])
+                waste_chp_efficiency_schedule[i] = Float64(waste_df[eff_row, Symbol(string(calendar_years[i]))])
             end
-            println("  Loaded Waste_CHP time-varying efficiency")
+            println("  Loaded Waste_CHP time-varying efficiency: ", round.(waste_chp_efficiency_schedule, digits=2))
+        else
+            println("  WARNING: 'efficiency' row not found in WasteChpEfficiency sheet")
+        end
+
+        # Load emission factor (row where parameter starts with "emission_factor")
+        # Values in Excel are already in tCO2/MWh
+        ef_row = findfirst(row -> startswith(lowercase(string(row.parameter)), "emission_factor"), eachrow(waste_df))
+        if ef_row !== nothing
+            for i in 1:T
+                waste_emission_factor_schedule[i] = Float64(waste_df[ef_row, Symbol(string(calendar_years[i]))])
+            end
+            println("  Loaded waste emission factors (tCO2/MWh): ", round.(waste_emission_factor_schedule, digits=3))
+        else
+            println("  WARNING: 'emission_factor' row not found in WasteChpEfficiency sheet")
+            # Fallback to static emission factor
+            base_ef = haskey(c_emission_fac, :waste) ? c_emission_fac[:waste] : 0.347
+            waste_emission_factor_schedule = fill(base_ef, T)
+            println("  Using static waste emission factor: $base_ef tCO2/MWh")
         end
     else
-        println("  WARNING: 'WasteChpEfficiency' sheet not found - Waste_CHP will use static efficiency")
+        println("  WARNING: 'WasteChpEfficiency' sheet not found - using default values")
+        waste_chp_efficiency_schedule = fill(0.9, T)
+        base_ef = haskey(c_emission_fac, :waste) ? c_emission_fac[:waste] : 0.347
+        waste_emission_factor_schedule = fill(base_ef, T)
     end
 
     # Load waste fuel availability constraint
@@ -498,6 +549,7 @@ function load_parameters(excel_path::String)
 
     if "HeatPumpCOP" in XLSX.sheetnames(xf)
         cop_df = DataFrame(XLSX.gettable(xf["HeatPumpCOP"]))
+        cop_tech_col = find_col_startswith(cop_df, "technology")
 
         # Row 1 in Excel = "High Temperature" = High-temp DH scenario
         # Row 2 in Excel = "Low Temperature" = Low-temp DH scenario
@@ -508,7 +560,7 @@ function load_parameters(excel_path::String)
         heatpump_cop_trajectories[low_temp_scenario] = Dict{Symbol,Dict{Int,Float64}}()
 
         for row in eachrow(cop_df)
-            tech = Symbol(row.technology)
+            tech = Symbol(row[cop_tech_col])
             cop_by_year = Dict{Int,Float64}()
             for i in 1:T
                 cal_year = calendar_years[i]
@@ -523,7 +575,7 @@ function load_parameters(excel_path::String)
 
         first_year = calendar_years[1]  # 2023
         for row in eachrow(cop_df)
-            tech = Symbol(row.technology)
+            tech = Symbol(row[cop_tech_col])
             first_year_cop = round(Float64(row[Symbol(string(first_year))]), digits=4)
             cop_by_year = Dict{Int,Float64}()
             for i in 1:T
@@ -585,11 +637,28 @@ function load_parameters(excel_path::String)
             events_sheet = xf["ExtremeEvents"]
             extreme_events = DataFrame(XLSX.gettable(events_sheet))
 
-            # Validate required columns exist
-            required_cols = [:probability, :demand_multiplier, :elec_price_multiplier, :dc_availability]
-            missing_cols = filter(col -> !(col in propertynames(extreme_events)), required_cols)
-            if !isempty(missing_cols)
-                error("ExtremeEvents sheet missing required columns: $missing_cols")
+            # Map required base names to actual column names (handles units in column names)
+            required_base_cols = ["probability", "demand_multiplier", "elec_price_multiplier", "dc_availability"]
+            col_mapping = Dict{String, Symbol}()
+            for base_name in required_base_cols
+                found = false
+                for col_name in names(extreme_events)
+                    if startswith(lowercase(string(col_name)), lowercase(base_name))
+                        col_mapping[base_name] = Symbol(col_name)
+                        found = true
+                        break
+                    end
+                end
+                if !found
+                    error("ExtremeEvents sheet missing column starting with: $base_name")
+                end
+            end
+
+            # Rename columns to simple names for internal use
+            for (base_name, full_col) in col_mapping
+                if full_col != Symbol(base_name)
+                    rename!(extreme_events, full_col => Symbol(base_name))
+                end
             end
 
             # Convert string columns to Float64 (handles decimal separator issues)
@@ -646,7 +715,7 @@ function load_parameters(excel_path::String)
         energy_transitions, initial_energy_dist,
         heatpump_cop_trajectories,
         investment_stages,
-        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_availability,
+        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_emission_factor_schedule, waste_availability,
         enable_extreme_events, apply_to_year, extreme_events
     )
 end
