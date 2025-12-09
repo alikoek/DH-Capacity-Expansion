@@ -592,8 +592,14 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                                 fuel_cost = carrier_prices[carrier]
                             end
 
-                            # Get emission factor (time-varying for electricity, static for others)
-                            emission_factor = (carrier == :elec) ? params.elec_emission_factors[model_year] : params.c_emission_fac[carrier]
+                            # Get emission factor (time-varying for electricity and waste, static for others)
+                            if carrier == :elec
+                                emission_factor = params.elec_emission_factors[model_year]
+                            elseif carrier == :waste
+                                emission_factor = params.waste_emission_factor_schedule[model_year]
+                            else
+                                emission_factor = params.c_emission_fac[carrier]
+                            end
 
                             # Use temperature-adjusted efficiency
                             tech_cost = params.c_opex_var[tech] * u_production[tech, week, hour] +

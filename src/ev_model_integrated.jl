@@ -214,6 +214,7 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         # Existing capacity and schedules (unchanged)
         params.c_existing_capacity_schedule,
         params.waste_chp_efficiency_schedule,
+        params.waste_emission_factor_schedule,
         params.waste_availability,
 
         # Extreme events (MODIFIED for EV)

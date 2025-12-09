@@ -206,6 +206,8 @@ function calculate_performance_metrics(simulations, params::ModelParameters, dat
                     carbon_price = params.carbon_trajectory[model_year]  # Already TSEK
                     if carrier == :elec
                         emission_factor = params.elec_emission_factors[model_year]
+                    elseif carrier == :waste
+                        emission_factor = params.waste_emission_factor_schedule[model_year]
                     else
                         emission_factor = params.c_emission_fac[carrier]
                     end
