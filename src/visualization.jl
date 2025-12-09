@@ -129,7 +129,10 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
 
     # 1. Investment Decisions Plot (Bar Charts with Error Bars)
     println("Generating investment plots...")
-    years = [2023, 2030, 2040, 2050]
+    # Generate year labels dynamically based on T
+    base_year = 2025
+    years_per_period = params.T_years
+    years = [base_year + (i-1) * years_per_period for i in 1:params.T]
     inv_stages = collect(1:2:(params.T*2))
 
     # Collect investment data for all technologies
@@ -300,7 +303,8 @@ function generate_visualizations(simulations, params::ModelParameters, data::Pro
     # 4. Violin Plots - Production vs Demand
     println("Generating violin plots...")
 
-    xlabels_years = ["2020", "2030", "2040", "2050"]
+    # Generate year labels dynamically
+    xlabels_years = [string(y) for y in years]
     ope_var_demand = zeros(length(simulations), params.T)
 
     for (ope_stage, stage) in enumerate(2:2:2*params.T)
@@ -422,7 +426,12 @@ function generate_investment_plots_separate_bands(simulations, params::ModelPara
     println("Generating investment plots with separate bands...")
 
     inv_stages = collect(1:2:(params.T*2))
-    stages_display = [2020, 2030, 2040, 2050]
+
+    # Generate year labels dynamically based on T
+    # Assuming 5-year periods starting from 2025
+    base_year = 2025
+    years_per_period = params.T_years
+    stages_display = [base_year + (i-1) * years_per_period for i in 1:params.T]
 
     # Technology investment plots
     for tech in params.technologies
@@ -439,7 +448,7 @@ function generate_investment_plots_separate_bands(simulations, params::ModelPara
 
         legend_pos = tech == :Geothermal ? :topleft : :topright
 
-        fig = plot_bands_separate(u_invs, "$tech Investment", 1:4, (1:4, stages_display),
+        fig = plot_bands_separate(u_invs, "$tech Investment", 1:params.T, (1:params.T, stages_display),
                         "Investment Year", "Investment [MW_th]", legend_pos)
         savefig(joinpath(output_dir, "Investments_SeparateBands_$tech.png"))
     end
@@ -455,7 +464,7 @@ function generate_investment_plots_separate_bands(simulations, params::ModelPara
         end
     end
 
-    fig = plot_bands_separate(stor_invs, "Storage Investment", 1:4, (1:4, stages_display),
+    fig = plot_bands_separate(stor_invs, "Storage Investment", 1:params.T, (1:params.T, stages_display),
                     "Investment Year", "Investment [MWh]", :topleft)
     savefig(joinpath(output_dir, "Investments_SeparateBands_Storage.png"))
 
@@ -479,20 +488,21 @@ Creates two versions:
 """
 function plot_capacity_evolution_by_technology(simulations, params::ModelParameters, data::ProcessedData, output_dir::String)
     n_sims = length(simulations)
-    years = [2023, 2030, 2040, 2050]  # Display years
+    # Generate year labels dynamically based on T
+    base_year = 2025
+    years_per_period = params.T_years
+    years = [base_year + (i-1) * years_per_period for i in 1:params.T]
     model_years = 1:params.T
-    investment_stages = params.investment_stages  # [1, 3, 5, 7]
+    investment_stages = params.investment_stages
 
-    # Define colors
+    # Define colors dynamically for any number of investment stages
     color_existing = :gray
     color_new = :steelblue
-    vintage_colors = Dict(
-        0 => :gray,
-        1 => :steelblue,
-        3 => :seagreen,
-        5 => :darkorange,
-        7 => :firebrick
-    )
+    stage_colors = [:steelblue, :seagreen, :darkorange, :firebrick, :purple, :cyan, :magenta, :brown]
+    vintage_colors = Dict{Int, Symbol}(0 => :gray)
+    for (idx, stage) in enumerate(investment_stages)
+        vintage_colors[stage] = stage_colors[mod1(idx, length(stage_colors))]
+    end
 
     for tech in params.technologies
         println("  Processing $tech...")
@@ -601,13 +611,12 @@ function plot_capacity_evolution_by_technology(simulations, params::ModelParamet
             grid=true
         )
 
-        vintage_labels = Dict(
-            0 => "Existing",
-            1 => "2023 Inv",
-            3 => "2030 Inv",
-            5 => "2040 Inv",
-            7 => "2050 Inv"
-        )
+        # Generate vintage labels dynamically
+        vintage_labels = Dict{Int, String}(0 => "Existing")
+        for (idx, stage) in enumerate(investment_stages)
+            inv_year = years[idx]
+            vintage_labels[stage] = "$(inv_year) Inv"
+        end
 
         bar_width = 0.15
         vintages_to_show = [0; investment_stages]
