@@ -528,6 +528,15 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
                 )
             end
 
+            # Waste CHP minimum load factor constraint
+            # Ensures waste incineration runs at least at X% of available capacity (realistic baseload operation)
+            # Always feasible: if capacity = 0, minimum = 0
+            if :Waste_CHP in params.technologies && params.waste_min_load_factor > 0
+                @constraint(sp, [week in 1:data.n_weeks, hour in 1:data.hours_per_week],
+                    u_production[:Waste_CHP, week, hour] >= params.waste_min_load_factor * capacity_alive[:Waste_CHP]
+                )
+            end
+
             # ===== TEMPERATURE-DEPENDENT DEMAND MULTIPLIER =====
             # Get year-varying demand multiplier for this temperature scenario
             temp_scen_name = params.temp_scenarios[temp_scenario]

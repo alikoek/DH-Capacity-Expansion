@@ -61,6 +61,7 @@ struct ModelParameters
     waste_chp_efficiency_schedule::Vector{Float64}
     waste_emission_factor_schedule::Vector{Float64}  # Time-varying waste EF linked to efficiency
     waste_availability::Vector{Float64}
+    waste_min_load_factor::Float64  # Minimum load factor for Waste CHP (0-1, e.g., 0.25 = 25% of capacity)
 
     # Extreme events (optional)
     enable_extreme_events::Bool
@@ -102,6 +103,11 @@ function load_parameters(excel_path::String)
     # Load n_typical_weeks (optional, default to 6)
     n_typical_weeks_rows = config_df[config_df.parameter.=="n_typical_weeks", :value]
     n_typical_weeks = isempty(n_typical_weeks_rows) ? 6 : Int(n_typical_weeks_rows[1])
+
+    # Load waste_min_load_factor (optional, default to 0 = no minimum load constraint)
+    # This is the minimum load factor for Waste CHP (0-1, e.g., 0.25 = 25% of capacity)
+    waste_min_load_factor_rows = config_df[config_df.parameter.=="waste_min_load_factor", :value]
+    waste_min_load_factor_value = isempty(waste_min_load_factor_rows) ? 0.0 : Float64(waste_min_load_factor_rows[1])
 
     # Helper function to calculate calendar year for a model year
     # Year 1 → 2023, Year 2 → 2030, Year 3+ → 2030 + (m-2)*T_years
@@ -715,7 +721,7 @@ function load_parameters(excel_path::String)
         energy_transitions, initial_energy_dist,
         heatpump_cop_trajectories,
         investment_stages,
-        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_emission_factor_schedule, waste_availability,
+        c_existing_capacity_schedule, waste_chp_efficiency_schedule, waste_emission_factor_schedule, waste_availability, waste_min_load_factor_value,
         enable_extreme_events, apply_to_year, extreme_events
     )
 end
