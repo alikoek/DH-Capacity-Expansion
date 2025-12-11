@@ -216,6 +216,7 @@ function build_ev_sddp_model_integrated(params::ModelParameters, data::Processed
         params.waste_chp_efficiency_schedule,
         params.waste_emission_factor_schedule,
         params.waste_availability,
+        params.waste_min_load_factor,
 
         # Extreme events (MODIFIED for EV)
         params.enable_extreme_events,
