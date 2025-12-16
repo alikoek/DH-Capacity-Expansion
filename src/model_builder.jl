@@ -7,59 +7,112 @@ using SDDP, Gurobi, LinearAlgebra, DataFrames
 # Note: helper_functions.jl is included by DHCapEx.jl module
 
 """
-    build_transition_matrices(T::Int, energy_transitions, initial_energy_dist, temp_probs)
+    build_transition_matrices(T::Int, energy_transitions, initial_energy_dist, temp_probs; late_temp_branching::Bool=false)
 
-Build Markovian transition matrices for the policy graph with:
-- Stage 1: System temperature scenario branching (1→2 nodes) - EARLY BRANCHING
-- Stage 2: Energy price branching within each system temp scenario (2→6 nodes)
-- Stage 3+: Energy price transitions within system temperature scenarios (6 nodes)
+Build Markovian transition matrices for the policy graph.
+
+# Branching modes:
+
+## Early branching (default, late_temp_branching=false):
+- Stage 1: Temperature scenario branching (1→2 nodes)
+- Stage 2: Energy price branching within each temp scenario (2→6 nodes)
+- Stage 3+: Energy price transitions within temp scenarios (6 nodes)
+
+## Late branching (late_temp_branching=true):
+- Stage 1: No branching (single investment node)
+- Stage 2: Energy price branching only (1→3 nodes)
+- Stage 3: Temperature branching (3→6 nodes)
+- Stage 4+: Energy price transitions within temp scenarios (6 nodes)
 
 # Arguments
 - `T::Int`: Number of model years
 - `energy_transitions::Matrix{Float64}`: Energy state transition probabilities (3×3)
 - `initial_energy_dist::Vector{Float64}`: Initial energy distribution (1×3)
 - `temp_probs::Vector{Float64}`: System temperature scenario branching probabilities (1×2)
+- `late_temp_branching::Bool`: If true, branch temperature at stage 2→3 instead of root→1
 
 # Returns
 - Vector of transition matrices
 """
 function build_transition_matrices(T::Int, energy_transitions::Matrix{Float64},
     initial_energy_dist::Vector{Float64},
-    temp_probs::Vector{Float64})
+    temp_probs::Vector{Float64};
+    late_temp_branching::Bool=false)
 
     transition_matrices = Array{Float64,2}[]
 
-    for stage in 1:(2*T)
-        if stage == 1
-            # Stage 1: System temperature scenario branching at root (1 node → 2 nodes)
-            # This makes first investments aware of DH system temperature regime
-            push!(transition_matrices, reshape(temp_probs, 1, 2))
+    if late_temp_branching
+        # Late branching: temperature revealed after first operational stage
+        for stage in 1:(2*T)
+            if stage == 1
+                # Root → Stage 1: single investment node (no branching yet)
+                push!(transition_matrices, reshape([1.0], 1, 1))
 
-        elseif stage == 2
-            # Stage 2: First energy branching (2 temp → 6 energy×temp nodes)
-            # 2×6 matrix: each system temperature scenario branches to 3 energy states
-            M = zeros(2, 6)
-            for temp in 1:2
+            elseif stage == 2
+                # Stage 1 → Stage 2: energy branching only (1→3 nodes)
+                # First operational stage reveals energy price state
+                push!(transition_matrices, reshape(initial_energy_dist, 1, 3))
+
+            elseif stage == 3
+                # Stage 2 → Stage 3: temperature branching (3→6 nodes)
+                # Each energy state branches to 2 temperature scenarios
                 # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
-                cols = (temp - 1) * 3 .+ (1:3)
-                M[temp, cols] = initial_energy_dist
-            end
-            push!(transition_matrices, M)
+                M = zeros(3, 6)
+                for e in 1:3
+                    M[e, e] = temp_probs[1]       # energy e, temp 1
+                    M[e, e + 3] = temp_probs[2]   # energy e, temp 2
+                end
+                push!(transition_matrices, M)
 
-        elseif isodd(stage)
-            # Odd stages > 2: opr → inv (energy stays same within each temp scenario)
-            push!(transition_matrices, Matrix{Float64}(I, 6, 6))
+            elseif iseven(stage)  # stage >= 4, even = going to operational
+                # Energy transitions within each temperature scenario
+                M = zeros(6, 6)
+                for temp in 1:2
+                    rows = (temp - 1) * 3 .+ (1:3)
+                    cols = (temp - 1) * 3 .+ (1:3)
+                    M[rows, cols] = energy_transitions
+                end
+                push!(transition_matrices, M)
 
-        else
-            # Even stages > 2: inv → opr (energy transitions within each temp scenario)
-            # 6×6 block diagonal: energy transitions don't cross system temperature scenarios
-            M = zeros(6, 6)
-            for temp in 1:2
-                rows = (temp - 1) * 3 .+ (1:3)
-                cols = (temp - 1) * 3 .+ (1:3)
-                M[rows, cols] = energy_transitions
+            else  # stage >= 5, odd = going to investment
+                # Identity (no new info revealed)
+                push!(transition_matrices, Matrix{Float64}(I, 6, 6))
             end
-            push!(transition_matrices, M)
+        end
+    else
+        # Early branching (default): temperature revealed before first investment
+        for stage in 1:(2*T)
+            if stage == 1
+                # Stage 1: System temperature scenario branching at root (1 node → 2 nodes)
+                # This makes first investments aware of DH system temperature regime
+                push!(transition_matrices, reshape(temp_probs, 1, 2))
+
+            elseif stage == 2
+                # Stage 2: First energy branching (2 temp → 6 energy×temp nodes)
+                # 2×6 matrix: each system temperature scenario branches to 3 energy states
+                M = zeros(2, 6)
+                for temp in 1:2
+                    # Node ordering: (e1,t1), (e2,t1), (e3,t1), (e1,t2), (e2,t2), (e3,t2)
+                    cols = (temp - 1) * 3 .+ (1:3)
+                    M[temp, cols] = initial_energy_dist
+                end
+                push!(transition_matrices, M)
+
+            elseif isodd(stage)
+                # Odd stages > 2: opr → inv (energy stays same within each temp scenario)
+                push!(transition_matrices, Matrix{Float64}(I, 6, 6))
+
+            else
+                # Even stages > 2: inv → opr (energy transitions within each temp scenario)
+                # 6×6 block diagonal: energy transitions don't cross system temperature scenarios
+                M = zeros(6, 6)
+                for temp in 1:2
+                    rows = (temp - 1) * 3 .+ (1:3)
+                    cols = (temp - 1) * 3 .+ (1:3)
+                    M[rows, cols] = energy_transitions
+                end
+                push!(transition_matrices, M)
+            end
         end
     end
 
@@ -67,28 +120,35 @@ function build_transition_matrices(T::Int, energy_transitions::Matrix{Float64},
 end
 
 """
-    build_sddp_model(params::ModelParameters, data::ProcessedData)
+    build_sddp_model(params::ModelParameters, data::ProcessedData; late_temp_branching::Bool=false)
 
 Build the SDDP model for capacity expansion optimization.
 
 # Arguments
 - `params::ModelParameters`: Model parameters structure
 - `data::ProcessedData`: Processed data structure
+- `late_temp_branching::Bool`: If true, temperature branches at stage 2→3 (after first operations).
+                               If false (default), temperature branches at root→1 (before first investment).
 
 # Returns
 - SDDP.PolicyGraph: The constructed SDDP model
-"""
-function build_sddp_model(params::ModelParameters, data::ProcessedData)
-    println("Building SDDP model...")
 
-    # Build transition matrices
+# Notes
+Late temperature branching creates hedging value for Year 1 investments, as they must be
+robust to both temperature scenarios. Early branching (default) allows Year 1 investments
+to be scenario-specific.
+"""
+function build_sddp_model(params::ModelParameters, data::ProcessedData; late_temp_branching::Bool=false)
+    println("Building SDDP model (late_temp_branching=$late_temp_branching)...")
+
     # Build transition matrices using loaded parameters
     temp_probs = [params.temp_scenario_probabilities[i] for i in 1:2]  # Convert Dict to Vector
     transition_matrices = build_transition_matrices(
         params.T,
         params.energy_transitions,
         params.initial_energy_dist,
-        temp_probs
+        temp_probs;
+        late_temp_branching=late_temp_branching
     )
 
     # Note: decode_markov_state is now defined in helper_functions.jl
@@ -100,7 +160,7 @@ function build_sddp_model(params::ModelParameters, data::ProcessedData)
         optimizer=Gurobi.Optimizer
     ) do sp, node
         t, markov_state = node
-        energy_state, temp_scenario = decode_markov_state(t, markov_state)
+        energy_state, temp_scenario = decode_markov_state(t, markov_state; late_temp_branching=late_temp_branching)
 
         # Variables
         @variables(sp, begin
