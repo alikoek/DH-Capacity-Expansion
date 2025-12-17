@@ -47,6 +47,9 @@ const N_SIMULATIONS_EV = 10       # For EV model only (deterministic - all resul
 # Random seed for reproducibility (CRITICAL for valid VSS comparison)
 const RANDOM_SEED = 12345
 
+# Branching structure
+const LATE_TEMP_BRANCHING = true  # true = late branching (default), false = early branching
+
 # Output configuration
 const OUTPUT_DIR = joinpath(@__DIR__, "..", "output")
 
@@ -78,7 +81,9 @@ println("PART 1: STOCHASTIC SOLUTION (SDDP)")
 println("="^70)
 
 println("\n3. Building SDDP model...")
-sddp_model = build_sddp_model(params, data)
+branching_str = LATE_TEMP_BRANCHING ? "LATE" : "EARLY"
+println("   Temperature branching: $branching_str")
+sddp_model = build_sddp_model(params, data; late_temp_branching=LATE_TEMP_BRANCHING)
 println("   Nodes: $(length(sddp_model.nodes))")
 
 println("\n4. Training SDDP model ($ITERATION_LIMIT_SDDP iterations)...")

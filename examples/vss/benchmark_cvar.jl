@@ -35,6 +35,9 @@ const N_SIMULATIONS_EV = 10
 const RANDOM_SEED = 12345
 const CVAR_ALPHA = 0.95  # Focus on worst 5% of outcomes
 
+# Branching structure
+const LATE_TEMP_BRANCHING = true  # true = late branching (default), false = early branching
+
 const OUTPUT_DIR = joinpath(@__DIR__, "..", "output")
 
 ##############################################################################
@@ -73,7 +76,9 @@ println("PART 1: RISK-AVERSE SDDP (CVaR)")
 println("="^70)
 
 println("\n3. Building SDDP model...")
-sddp_model = build_sddp_model(params, data)
+branching_str = LATE_TEMP_BRANCHING ? "LATE" : "EARLY"
+println("   Temperature branching: $branching_str")
+sddp_model = build_sddp_model(params, data; late_temp_branching=LATE_TEMP_BRANCHING)
 println("   Nodes: $(length(sddp_model.nodes))")
 
 println("\n4. Training SDDP model with CVaR($CVAR_ALPHA) ($ITERATION_LIMIT_SDDP iterations)...")
