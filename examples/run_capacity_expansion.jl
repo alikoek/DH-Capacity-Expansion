@@ -29,8 +29,11 @@ excel_file = joinpath(data_dir, "model_parameters.xlsx")
 ITERATION_LIMIT = 1000       # Maximum number of SDDP training iterations (with auto-stop)
 N_SIMULATIONS = 1000         # Number of Monte Carlo simulations
 RANDOM_SEED = 1234           # Random seed for reproducibility
-RISK_MEASURE = :Expectation         # Risk measure: :CVaR, :Expectation, or :WorstCase
+RISK_MEASURE = :Expectation  # Risk measure: :CVaR, :Expectation, or :WorstCase
 CVAR_ALPHA = 0.95            # CVaR confidence level (if using CVaR)
+
+# Branching structure
+LATE_TEMP_BRANCHING = true   # true = late branching (temp revealed at stage 3), false = early branching
 
 ##############################################################################
 # Main Execution
@@ -56,8 +59,10 @@ println()
 
 # Step 3: Build SDDP model
 println("Step 3/5: Building SDDP model...")
-model = build_sddp_model(params, data)
-println("  Model constructed successfully")
+branching_str = LATE_TEMP_BRANCHING ? "LATE" : "EARLY"
+println("  Temperature branching: $branching_str")
+model = build_sddp_model(params, data; late_temp_branching=LATE_TEMP_BRANCHING)
+println("  Model constructed successfully ($(length(model.nodes)) nodes)")
 println()
 
 # Step 4: Run training and simulations
