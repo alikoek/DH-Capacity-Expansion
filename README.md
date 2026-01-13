@@ -4,15 +4,18 @@ A modular Julia framework for optimizing capacity expansion decisions in distric
 
 ## Features
 
-- **Multi-technology optimization**: CHP, Boiler, Heat Pump, Geothermal
+- **Multi-technology optimization**: CHP, Boiler, Heat Pump, Geothermal, Data Center Heat Recovery
 - **Thermal storage modeling**: With charge/discharge dynamics and heat losses
 - **Representative weeks**: Efficient temporal resolution using TSAM clustering
-- **Three-uncertainty stochastic optimization**:
-  - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes (starting from Medium)
-  - **Temperature-dependent demand**: Demand multipliers per temperature scenario
-  - **Early system temperature scenario branching**: Two DH system temperature scenarios (Low-temp/High-temp) affecting heat pump COP and demand
+- **Stochastic optimization** with multiple uncertainty sources:
+  - **Markovian energy prices**: State-dependent transitions between High/Medium/Low price regimes
+  - **System temperature scenarios**: Early or late branching for DH temperature regime uncertainty
+  - **Temperature-dependent demand**: Demand multipliers linked to temperature scenarios
+- **Configurable branching structure**: Early branching (temperature revealed before first investment) or late branching (revealed after first investment)
 - **Risk measures**: CVaR, expectation, worst-case
 - **Vintage tracking**: Tracks capacity by investment year and retirement
+- **VSS analysis**: Value of Stochastic Solution benchmarking against expected-value models
+- **Results persistence**: Save and load simulation results for later analysis
 - **Comprehensive visualization**: Investment plots, load duration curves, violin plots, spaghetti plots
 - **Fully configurable**: All uncertainties and parameters externalized to Excel
 
@@ -21,21 +24,24 @@ A modular Julia framework for optimizing capacity expansion decisions in distric
 ```
 DH-Capacity-Expansion/
 ├── src/
-│   ├── DHCapEx.jl              # Main module
+│   ├── DHCapEx.jl               # Main module
 │   ├── parameters.jl            # Parameter loading from Excel
 │   ├── data_processing.jl       # Representative weeks and electricity prices
 │   ├── helper_functions.jl      # Utility functions
 │   ├── model_builder.jl         # SDDP model construction
 │   ├── simulation.jl            # Training and simulation
 │   ├── simulation_metrics.jl    # Performance metrics calculation
-│   └── visualization.jl         # Plotting functions
+│   ├── visualization.jl         # Plotting functions
+│   ├── results_io.jl            # Save/load simulation results
+│   ├── ev_model_integrated.jl   # Expected-value model for VSS analysis
+│   └── ev_policy_evaluation.jl  # VSS calculation functions
 ├── data/
 │   ├── model_parameters.xlsx    # All model parameters (single Excel file)
 │   ├── typical_weeks.csv        # Representative weeks from TSAM
-│   ├── ElectricityPrice2030.csv # Hourly electricity prices
-│   └── ElectricityPrice2050.csv
+│   └── ElectricityPrices.xlsx   # Hourly electricity prices
 ├── examples/
-│   └── run_capacity_expansion.jl # Simple runner script
+│   ├── run_capacity_expansion.jl   # Main runner script
+│   └── analyze_saved_results.jl    # Analyze previously saved results
 └── output/                      # Results and plots
 ```
 
@@ -60,9 +66,9 @@ Pkg.add(["SDDP", "Gurobi", "XLSX", "CSV", "DataFrames", "Plots", "StatsPlots", "
 ### 1. Prepare Data
 
 Ensure your data files are in the `data/` directory:
-- `model_parameters.xlsx`: Excel file with parameter sheets (auto-generated)
+- `model_parameters.xlsx`: Excel file with parameter sheets
 - `typical_weeks.csv`: Representative weeks from TSAM
-- `ElectricityPrice2030.csv` and `ElectricityPrice2050.csv`: Hourly electricity prices
+- `ElectricityPrices.xlsx`: Hourly electricity prices
 
 ### 2. Run the Model
 
@@ -136,10 +142,6 @@ The `model_parameters.xlsx` file contains all model parameters in separate sheet
 - `scenario`: Scenario number (1-2)
 - `probability`: Branching probability at stage 1 (must sum to 1.0)
 
-**DemandUncertainty** (deprecated): Stage-wise independent demand multipliers
-- Now handled via `demand_multiplier` column in TemperatureScenarios sheet
-- Demand varies by temperature scenario rather than stage-wise independently
-
 **EnergyTransitions**: Markovian transition matrix for energy price states (3×3)
 - `from_state`: Current energy state (High, Medium, Low)
 - `to_high`: Probability of transitioning to High state
@@ -189,21 +191,23 @@ state | description | price_eur_per_mwh
 3     | Low         | 10.0               (was 20.0)
 ```
 
-### Example 3: Modeling Demand Growth Uncertainty
+### Example 3: Early vs Late Temperature Branching
 
-To test scenarios with higher demand variability, modify **DemandUncertainty**:
+The model supports two branching structures for temperature uncertainty:
 
-**High demand variability**
+**Early branching** (default): Temperature scenario revealed before first investment
+```julia
+model = build_sddp_model(params, data; late_temp_branching=false)
 ```
-multiplier | probability | description
-1.3        | 0.15        | Very high demand
-1.1        | 0.25        | High demand
-1.0        | 0.3         | Normal demand
-0.9        | 0.2         | Low demand
-0.7        | 0.1         | Very low demand
-```
+- First investment decision is temperature-aware
+- Suitable when temperature regime is known early
 
-**Note**: You can add up to ~5 multipliers. More multipliers increase computational time.
+**Late branching**: Temperature scenario revealed after first investment
+```julia
+model = build_sddp_model(params, data; late_temp_branching=true)
+```
+- First investment must hedge against temperature uncertainty
+- Suitable for analyzing value of early information
 
 ### Example 4: Technology Cost Sensitivity
 
@@ -272,11 +276,14 @@ using DHCapEx
 params = load_parameters("data/model_parameters.xlsx")
 data = load_all_data(params, "data/")
 
-# Build and solve model
-model = build_sddp_model(params, data)
+# Build and solve model (late_temp_branching=true for hedging analysis)
+model = build_sddp_model(params, data; late_temp_branching=true)
 simulations = run_simulation(model, params, data;
                             iteration_limit=100,
                             n_simulations=400)
+
+# Save results for later analysis
+saved_path = save_simulation_results_auto(simulations, params, data; output_dir="output/")
 
 # Generate outputs
 generate_visualizations(simulations, params, data; output_dir="output/")
@@ -286,6 +293,16 @@ print_summary_statistics(simulations, params, data)
 # Calculate performance metrics
 metrics = calculate_performance_metrics(simulations, params, data)
 export_performance_metrics(metrics, "output/performance_metrics.txt")
+```
+
+### Loading Saved Results
+
+```julia
+# Load previously saved results
+simulations, params, data, metadata = load_simulation_results("output/results_20241215_143022.jld2")
+
+# Re-analyze without re-running optimization
+generate_visualizations(simulations, params, data; output_dir="output/")
 ```
 
 ## Advanced Usage
@@ -323,6 +340,9 @@ params = load_parameters("data/model_parameters.xlsx")
 ## Output Files
 
 After running the optimization, the following files are generated in `output/`:
+
+### Results Data
+- `results_YYYYMMDD_HHMMSS.jld2`: Complete simulation data for later analysis (JLD2 format)
 
 ### Text Output
 - `simulation_results.txt`: Detailed simulation results for each stage
@@ -426,7 +446,6 @@ After making changes to parameters, verify your model is well-configured:
 3. **Verify probabilities sum to 1.0**:
    - Each row in **EnergyTransitions** must sum to 1.0
    - **TemperatureProbabilities** probabilities must sum to 1.0
-   - **DemandUncertainty** probabilities must sum to 1.0
 
 4. **Check for unmet demand**:
    - Some unmet demand is normal during uncertainty
@@ -514,7 +533,7 @@ iteration    simulation      bound        time (s)
 
 1. **XLSX package not found**: Run `import Pkg; Pkg.add("XLSX")`
 2. **Gurobi license error**: Ensure Gurobi is installed and licensed
-3. **Data files not found**: Check that `typical_weeks.csv` and electricity price files are in `data/`
+3. **Data files not found**: Check that `typical_weeks.csv` and `ElectricityPrices.xlsx` are in `data/`
 4. **Module not found**: Ensure you've added `src/` to `LOAD_PATH`
 
 ## Contributing
